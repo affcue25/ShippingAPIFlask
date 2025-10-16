@@ -24,7 +24,8 @@ app = Flask(__name__)
 CORS(app)
 
 # Database configuration
-DB_FILE = '../shipments_data.db'
+import os
+DB_FILE = os.path.join(os.path.dirname(__file__), 'shipments_data.db')  # Use database in api folder
 
 class DatabaseManager:
     """Database connection and query manager"""
@@ -392,13 +393,18 @@ def get_average_weight():
         
         start_date, end_date = parse_date_filter(date_filter)
         
-        where_clause = ""
+        # Build the complete WHERE clause
+        conditions = []
         params = []
         
         if start_date and end_date:
             date_sql = get_date_filter_sql()
-            where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
-            params = [start_date, end_date]
+            conditions.append(f"{date_sql} >= ? AND {date_sql} <= ?")
+            params.extend([start_date, end_date])
+        
+        conditions.append("shipment_weight != '' AND shipment_weight IS NOT NULL")
+        
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         
         query = f"""
         SELECT 
@@ -406,7 +412,6 @@ def get_average_weight():
             COUNT(*) as total_shipments
         FROM shipments 
         {where_clause}
-        AND shipment_weight != '' AND shipment_weight IS NOT NULL
         """
         
         result = db.execute_query(query, params)
