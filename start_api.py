@@ -45,7 +45,7 @@ def check_dependencies():
 
 def check_database():
     """Check if database file exists"""
-    db_file = '../api/shipments_data.db'
+    db_file = 'shipments_data.db'
     
     if not os.path.exists(db_file):
         print(f"⚠️  Database file not found: {db_file}")
