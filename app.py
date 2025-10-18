@@ -218,6 +218,25 @@ def health_check():
         'database': db_status
     })
 
+@app.route('/api/debug/customers', methods=['GET'])
+def debug_customers():
+    """Debug endpoint to test customers query"""
+    try:
+        # Simple test query
+        query = "SELECT shipper_name, COUNT(*) as count FROM shipments GROUP BY shipper_name LIMIT 5"
+        result = db.execute_query(query)
+        
+        return jsonify({
+            'success': True,
+            'data': result,
+            'count': len(result)
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/shipments', methods=['GET'])
 def get_all_shipments():
     """
@@ -360,11 +379,16 @@ def get_top_customers():
         return jsonify({
             'data': customers,
             'date_filter': date_filter,
-            'limit': limit
+            'limit': limit,
+            'query_debug': {
+                'where_clause': where_clause,
+                'params': params,
+                'query': query
+            }
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'query_debug': {'where_clause': where_clause, 'params': params, 'query': query}}), 500
 
 @app.route('/api/shipments/recent', methods=['GET'])
 def get_recent_shipments():
