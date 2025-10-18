@@ -181,6 +181,27 @@ def convert_sqlite_to_postgresql(query):
     """Convert SQLite placeholders (?) to PostgreSQL placeholders (%s)"""
     return query.replace('?', '%s')
 
+def get_weight_parsing_sql():
+    """Get SQL for parsing weight values to numeric format"""
+    return """
+    CASE 
+        WHEN shipment_weight IS NULL OR shipment_weight = '' THEN NULL
+        ELSE 
+            CAST(
+                REGEXP_REPLACE(
+                    REGEXP_REPLACE(
+                        REGEXP_REPLACE(
+                            TRIM(shipment_weight), 
+                            '[^0-9.]', '', 'g'
+                        ),
+                        '^[.]', '0.', 'g'
+                    ),
+                    '[.]$', '', 'g'
+                ) AS NUMERIC
+            )
+    END
+    """
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -430,13 +451,14 @@ def get_average_weight():
             conditions.append(f"{date_sql} >= ? AND {date_sql} <= ?")
             params.extend([start_date, end_date])
         
-        conditions.append("shipment_weight != '' AND shipment_weight IS NOT NULL")
+        conditions.append("shipment_weight IS NOT NULL AND shipment_weight != '' AND shipment_weight ~ '[0-9]'")
         
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         
+        weight_sql = get_weight_parsing_sql()
         query = f"""
         SELECT 
-            AVG(CAST(REGEXP_REPLACE(REGEXP_REPLACE(shipment_weight, 'kg', '', 'g'), 'g', '', 'g') AS NUMERIC)) as average_weight,
+            AVG({weight_sql}) as average_weight,
             COUNT(*) as total_shipments
         FROM shipments 
         {where_clause}
@@ -590,7 +612,8 @@ def get_shipments_by_weight():
         date_filter = request.args.get('date_filter')
         limit = int(request.args.get('limit', 50))
         
-        where_conditions = ["CAST(REGEXP_REPLACE(REGEXP_REPLACE(shipment_weight, 'kg', '', 'g'), 'g', '', 'g') AS NUMERIC) > ?"]
+        weight_sql = get_weight_parsing_sql()
+        where_conditions = [f"{weight_sql} > ?"]
         params = [min_weight]
         
         if date_filter and date_filter != 'total':
