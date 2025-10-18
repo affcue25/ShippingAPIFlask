@@ -437,8 +437,13 @@ def get_recent_shipments():
     try:
         limit = int(request.args.get('limit', 20))
         
-        # Use the primary key index for fast ordering on large datasets
-        query = "SELECT * FROM shipments ORDER BY id DESC LIMIT ?"
+        # Use processing_date for proper recent ordering since shipment_creation_date is varchar
+        query = """
+        SELECT * FROM shipments 
+        WHERE processing_date IS NOT NULL 
+        ORDER BY processing_date DESC 
+        LIMIT ?
+        """
         shipments = db.execute_query(query, [limit])
         
         return jsonify({
@@ -539,12 +544,12 @@ def get_average_weight():
 def get_total_shipments():
     """
     Get total shipment count - optimized for large datasets
-    Query params: date_filter (month)
+    Query params: date_filter (defaults to month)
     """
     try:
-        date_filter = request.args.get('date_filter', 'month')
+        date_filter = request.args.get('date_filter', 'month')  # Default to month
         
-        if not date_filter or date_filter == 'total':
+        if date_filter == 'total':
             # For total count, use a fast approximation for large datasets
             query = """
             SELECT 
@@ -554,6 +559,7 @@ def get_total_shipments():
             result = db.execute_query(query)
             total = result[0]['total_count'] if result else 0
         else:
+            # Default behavior: use month filter or provided filter
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
                 # Use processing_date index for better performance
@@ -567,7 +573,7 @@ def get_total_shipments():
                 result = db.execute_query(query, params)
                 total = result[0]['total'] if result else 0
             else:
-                # Fallback to total count
+                # Fallback to total count if date parsing fails
                 query = "SELECT COUNT(*) as total FROM shipments"
                 result = db.execute_query(query)
                 total = result[0]['total'] if result else 0
@@ -593,18 +599,12 @@ def get_top_cities():
         # For large datasets, use sample-based approach
         if not date_filter or date_filter == 'total':
             query = """
-            WITH sample_shipments AS (
-                SELECT consignee_city
-                FROM shipments 
-                WHERE consignee_city IS NOT NULL 
-                AND consignee_city != ''
-                ORDER BY id DESC
-                LIMIT 100000
-            )
             SELECT 
                 consignee_city as city,
                 COUNT(*) as shipment_count
-            FROM sample_shipments
+            FROM shipments 
+            WHERE consignee_city IS NOT NULL 
+            AND consignee_city != ''
             GROUP BY consignee_city 
             ORDER BY shipment_count DESC 
             LIMIT ?
@@ -629,20 +629,14 @@ def get_top_cities():
                 """
                 params = [start_date, end_date, limit]
             else:
-                # Fallback to sample-based query
+                # Fallback to simple query
                 query = """
-                WITH sample_shipments AS (
-                    SELECT consignee_city
-                    FROM shipments 
-                    WHERE consignee_city IS NOT NULL 
-                    AND consignee_city != ''
-                    ORDER BY id DESC
-                    LIMIT 100000
-                )
                 SELECT 
                     consignee_city as city,
                     COUNT(*) as shipment_count
-                FROM sample_shipments
+                FROM shipments 
+                WHERE consignee_city IS NOT NULL 
+                AND consignee_city != ''
                 GROUP BY consignee_city 
                 ORDER BY shipment_count DESC 
                 LIMIT ?
