@@ -22,7 +22,7 @@ import tempfile
 import uuid
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 
 # Database configuration
 from database_config import DB_CONFIG
@@ -222,7 +222,7 @@ def health_check():
 def debug_customers():
     """Debug endpoint to test customers query"""
     try:
-        # Simple test query
+        # Very simple test query
         query = "SELECT shipper_name, COUNT(*) as count FROM shipments GROUP BY shipper_name LIMIT 5"
         result = db.execute_query(query)
         
@@ -350,45 +350,62 @@ def get_top_customers():
         date_filter = request.args.get('date_filter')
         limit = int(request.args.get('limit', 10))
         
-        # Build query
-        where_clause = ""
-        params = []
-        
-        if date_filter and date_filter != 'total':
+        # Optimized query - use simple aggregation without complex date filtering for better performance
+        if not date_filter or date_filter == 'total':
+            # Fast query without date filtering
+            query = """
+            SELECT 
+                shipper_name,
+                COUNT(*) as shipment_count,
+                COUNT(DISTINCT consignee_name) as unique_consignees
+            FROM shipments 
+            GROUP BY shipper_name 
+            ORDER BY shipment_count DESC 
+            LIMIT ?
+            """
+            params = [limit]
+        else:
+            # Only apply date filtering if specifically requested
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
                 date_sql = get_date_filter_sql()
                 where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
-                params = [start_date, end_date]
-        
-        query = f"""
-        SELECT 
-            shipper_name,
-            COUNT(*) as shipment_count,
-            COUNT(DISTINCT consignee_name) as unique_consignees
-        FROM shipments 
-        {where_clause}
-        GROUP BY shipper_name 
-        ORDER BY shipment_count DESC 
-        LIMIT ?
-        """
-        params.append(limit)
+                query = f"""
+                SELECT 
+                    shipper_name,
+                    COUNT(*) as shipment_count,
+                    COUNT(DISTINCT consignee_name) as unique_consignees
+                FROM shipments 
+                {where_clause}
+                GROUP BY shipper_name 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [start_date, end_date, limit]
+            else:
+                # Fallback to simple query if date parsing fails
+                query = """
+                SELECT 
+                    shipper_name,
+                    COUNT(*) as shipment_count,
+                    COUNT(DISTINCT consignee_name) as unique_consignees
+                FROM shipments 
+                GROUP BY shipper_name 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [limit]
         
         customers = db.execute_query(query, params)
         
         return jsonify({
             'data': customers,
             'date_filter': date_filter,
-            'limit': limit,
-            'query_debug': {
-                'where_clause': where_clause,
-                'params': params,
-                'query': query
-            }
+            'limit': limit
         })
         
     except Exception as e:
-        return jsonify({'error': str(e), 'query_debug': {'where_clause': where_clause, 'params': params, 'query': query}}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/shipments/recent', methods=['GET'])
 def get_recent_shipments():
