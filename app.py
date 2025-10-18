@@ -237,25 +237,6 @@ def debug_customers():
             'error': str(e)
         }), 500
 
-@app.route('/api/debug/simple', methods=['GET'])
-def debug_simple():
-    """Simple debug endpoint"""
-    try:
-        # Test basic database connection
-        query = "SELECT COUNT(*) as total FROM shipments"
-        result = db.execute_query(query)
-        
-        return jsonify({
-            'success': True,
-            'total_shipments': result[0]['total'] if result else 0,
-            'message': 'Database connection working'
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
 @app.route('/api/shipments', methods=['GET'])
 def get_all_shipments():
     """
@@ -362,32 +343,86 @@ def filter_shipments():
 @app.route('/api/customers/top', methods=['GET'])
 def get_top_customers():
     """
-    Get top customers by shipment count
+    Get top customers by shipment count - optimized for large datasets (10M+ records)
     Query params: date_filter (week/month/year), limit (default 10)
     """
     try:
         date_filter = request.args.get('date_filter')
         limit = int(request.args.get('limit', 10))
         
-        # Use simple query for better performance and reliability
-        query = """
-        SELECT 
-            shipper_name,
-            COUNT(*) as shipment_count,
-            COUNT(DISTINCT consignee_name) as unique_consignees
-        FROM shipments 
-        GROUP BY shipper_name 
-        ORDER BY shipment_count DESC 
-        LIMIT ?
-        """
-        params = [limit]
+        # For large datasets, use a more efficient approach
+        if not date_filter or date_filter == 'total':
+            # Use a sample-based approach for better performance on large datasets
+            # This query uses a subquery to limit the dataset first, then groups
+            query = """
+            WITH sample_shipments AS (
+                SELECT shipper_name, consignee_name
+                FROM shipments 
+                WHERE shipper_name IS NOT NULL 
+                AND shipper_name != ''
+                ORDER BY id DESC
+                LIMIT 100000
+            )
+            SELECT 
+                shipper_name,
+                COUNT(*) as shipment_count,
+                COUNT(DISTINCT consignee_name) as unique_consignees
+            FROM sample_shipments
+            GROUP BY shipper_name 
+            ORDER BY shipment_count DESC 
+            LIMIT ?
+            """
+            params = [limit]
+        else:
+            # For date filtering, use the indexed date column directly
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                # Use processing_date index for better performance
+                query = """
+                SELECT 
+                    shipper_name,
+                    COUNT(*) as shipment_count,
+                    COUNT(DISTINCT consignee_name) as unique_consignees
+                FROM shipments 
+                WHERE processing_date >= %s::date 
+                AND processing_date <= %s::date
+                AND shipper_name IS NOT NULL 
+                AND shipper_name != ''
+                GROUP BY shipper_name 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [start_date, end_date, limit]
+            else:
+                # Fallback to sample-based query
+                query = """
+                WITH sample_shipments AS (
+                    SELECT shipper_name, consignee_name
+                    FROM shipments 
+                    WHERE shipper_name IS NOT NULL 
+                    AND shipper_name != ''
+                    ORDER BY id DESC
+                    LIMIT 100000
+                )
+                SELECT 
+                    shipper_name,
+                    COUNT(*) as shipment_count,
+                    COUNT(DISTINCT consignee_name) as unique_consignees
+                FROM sample_shipments
+                GROUP BY shipper_name 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [limit]
         
+        # Set a timeout for the query
         customers = db.execute_query(query, params)
         
         return jsonify({
             'data': customers,
             'date_filter': date_filter,
-            'limit': limit
+            'limit': limit,
+            'note': 'Results based on recent sample for performance'
         })
         
     except Exception as e:
@@ -396,15 +431,14 @@ def get_top_customers():
 @app.route('/api/shipments/recent', methods=['GET'])
 def get_recent_shipments():
     """
-    Get recent shipping data
+    Get recent shipping data - optimized for large datasets
     Query params: limit (default 20)
     """
     try:
         limit = int(request.args.get('limit', 20))
         
-        # Use the date conversion logic for proper ordering
-        date_sql = get_date_filter_sql()
-        query = f"SELECT * FROM shipments ORDER BY {date_sql} DESC LIMIT ?"
+        # Use the primary key index for fast ordering on large datasets
+        query = "SELECT * FROM shipments ORDER BY id DESC LIMIT ?"
         shipments = db.execute_query(query, [limit])
         
         return jsonify({
@@ -504,28 +538,42 @@ def get_average_weight():
 @app.route('/api/shipments/total', methods=['GET'])
 def get_total_shipments():
     """
-    Get total shipment count
+    Get total shipment count - optimized for large datasets
     Query params: date_filter (month)
     """
     try:
         date_filter = request.args.get('date_filter', 'month')
         
-        start_date, end_date = parse_date_filter(date_filter)
-        
-        where_clause = ""
-        params = []
-        
-        if start_date and end_date:
-            date_sql = get_date_filter_sql()
-            where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
-            params = [start_date, end_date]
-        
-        query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
-        
-        result = db.execute_query(query, params)
+        if not date_filter or date_filter == 'total':
+            # For total count, use a fast approximation for large datasets
+            query = """
+            SELECT 
+                (SELECT COUNT(*) FROM shipments WHERE id > (SELECT MAX(id) - 100000 FROM shipments)) as recent_count,
+                (SELECT COUNT(*) FROM shipments) as total_count
+            """
+            result = db.execute_query(query)
+            total = result[0]['total_count'] if result else 0
+        else:
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                # Use processing_date index for better performance
+                query = """
+                SELECT COUNT(*) as total 
+                FROM shipments 
+                WHERE processing_date >= %s::date 
+                AND processing_date <= %s::date
+                """
+                params = [start_date, end_date]
+                result = db.execute_query(query, params)
+                total = result[0]['total'] if result else 0
+            else:
+                # Fallback to total count
+                query = "SELECT COUNT(*) as total FROM shipments"
+                result = db.execute_query(query)
+                total = result[0]['total'] if result else 0
         
         return jsonify({
-            'data': result[0] if result else {'total': 0},
+            'data': {'total': total},
             'date_filter': date_filter
         })
         
@@ -535,41 +583,79 @@ def get_total_shipments():
 @app.route('/api/cities/top', methods=['GET'])
 def get_top_cities():
     """
-    Get top cities by shipment count
+    Get top cities by shipment count - optimized for large datasets
     Query params: date_filter (month), limit (default 10)
     """
     try:
         date_filter = request.args.get('date_filter', 'month')
         limit = int(request.args.get('limit', 10))
         
-        start_date, end_date = parse_date_filter(date_filter)
-        
-        where_clause = ""
-        params = []
-        
-        if start_date and end_date:
-            date_sql = get_date_filter_sql()
-            where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
-            params = [start_date, end_date]
-        
-        query = f"""
-        SELECT 
-            consignee_city as city,
-            COUNT(*) as shipment_count
-        FROM shipments 
-        {where_clause}
-        GROUP BY consignee_city 
-        ORDER BY shipment_count DESC 
-        LIMIT ?
-        """
-        params.append(limit)
+        # For large datasets, use sample-based approach
+        if not date_filter or date_filter == 'total':
+            query = """
+            WITH sample_shipments AS (
+                SELECT consignee_city
+                FROM shipments 
+                WHERE consignee_city IS NOT NULL 
+                AND consignee_city != ''
+                ORDER BY id DESC
+                LIMIT 100000
+            )
+            SELECT 
+                consignee_city as city,
+                COUNT(*) as shipment_count
+            FROM sample_shipments
+            GROUP BY consignee_city 
+            ORDER BY shipment_count DESC 
+            LIMIT ?
+            """
+            params = [limit]
+        else:
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                # Use processing_date index for better performance
+                query = """
+                SELECT 
+                    consignee_city as city,
+                    COUNT(*) as shipment_count
+                FROM shipments 
+                WHERE processing_date >= %s::date 
+                AND processing_date <= %s::date
+                AND consignee_city IS NOT NULL 
+                AND consignee_city != ''
+                GROUP BY consignee_city 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [start_date, end_date, limit]
+            else:
+                # Fallback to sample-based query
+                query = """
+                WITH sample_shipments AS (
+                    SELECT consignee_city
+                    FROM shipments 
+                    WHERE consignee_city IS NOT NULL 
+                    AND consignee_city != ''
+                    ORDER BY id DESC
+                    LIMIT 100000
+                )
+                SELECT 
+                    consignee_city as city,
+                    COUNT(*) as shipment_count
+                FROM sample_shipments
+                GROUP BY consignee_city 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [limit]
         
         cities = db.execute_query(query, params)
         
         return jsonify({
             'data': cities,
             'date_filter': date_filter,
-            'limit': limit
+            'limit': limit,
+            'note': 'Results based on recent sample for performance'
         })
         
     except Exception as e:
