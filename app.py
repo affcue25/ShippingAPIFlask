@@ -7,7 +7,8 @@ Flask API for managing shipping data with comprehensive endpoints
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import os
 import json
 from datetime import datetime, timedelta
@@ -24,57 +25,63 @@ app = Flask(__name__)
 CORS(app)
 
 # Database configuration
-import os
-DB_FILE = os.path.join(os.path.dirname(__file__), 'shipments_data.db')  # Use database in api folder
+from database_config import DB_CONFIG
 
 class DatabaseManager:
-    """Database connection and query manager"""
+    """Database connection and query manager for PostgreSQL"""
     
-    def __init__(self, db_file=DB_FILE):
-        self.db_file = db_file
+    def __init__(self, config=DB_CONFIG):
+        self.config = config
     
     def get_connection(self):
         """Get database connection"""
-        return sqlite3.connect(self.db_file)
+        return psycopg2.connect(**self.config)
     
     def execute_query(self, query, params=None):
         """Execute query and return results"""
         conn = self.get_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
-        
-        # Get column names
-        columns = [description[0] for description in cursor.description]
-        
-        # Fetch all results
-        results = cursor.fetchall()
-        
-        # Convert to list of dictionaries
-        data = []
-        for row in results:
-            data.append(dict(zip(columns, row)))
-        
-        conn.close()
-        return data
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            
+            # Fetch all results
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            data = []
+            for row in results:
+                data.append(dict(row))
+            
+            return data
+        finally:
+            cursor.close()
+            conn.close()
     
     def execute_insert(self, query, params=None):
         """Execute insert/update/delete query"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        if params:
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query)
-        
-        conn.commit()
-        last_id = cursor.lastrowid
-        conn.close()
-        return last_id
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            
+            conn.commit()
+            # For PostgreSQL, we need to get the last inserted ID differently
+            if 'RETURNING' in query.upper():
+                result = cursor.fetchone()
+                return result[0] if result else None
+            else:
+                return cursor.rowcount
+        finally:
+            cursor.close()
+            conn.close()
 
 # Initialize database manager
 db = DatabaseManager()
@@ -167,7 +174,18 @@ def get_date_filter_sql():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+    try:
+        # Test database connection
+        db.execute_query("SELECT 1")
+        db_status = "connected"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+    
+    return jsonify({
+        'status': 'healthy', 
+        'timestamp': datetime.now().isoformat(),
+        'database': db_status
+    })
 
 @app.route('/api/shipments', methods=['GET'])
 def get_all_shipments():

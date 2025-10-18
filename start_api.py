@@ -16,7 +16,8 @@ def check_dependencies():
         'flask_cors',
         'pandas',
         'reportlab',
-        'python-dateutil'
+        'python-dateutil',
+        'psycopg2'
     ]
     
     missing_packages = []
@@ -44,16 +45,28 @@ def check_dependencies():
     return True
 
 def check_database():
-    """Check if database file exists"""
-    db_file = 'shipments_data.db'
-    
-    if not os.path.exists(db_file):
-        print(f"⚠️  Database file not found: {db_file}")
-        print("Make sure to run the main.py script first to create the database.")
+    """Check if PostgreSQL database connection works"""
+    try:
+        import psycopg2
+        from database_config import DB_CONFIG
+        
+        # Test database connection
+        conn = psycopg2.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        conn.close()
+        
+        print(f"✅ PostgreSQL database connection successful")
+        print(f"   Database: {DB_CONFIG['database']}")
+        print(f"   Host: {DB_CONFIG['host']}")
+        print(f"   User: {DB_CONFIG['user']}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ PostgreSQL database connection failed: {e}")
+        print("Make sure PostgreSQL is running and the database credentials are correct.")
         return False
-    
-    print(f"✅ Database file found: {db_file}")
-    return True
 
 def start_api():
     """Start the API server"""
