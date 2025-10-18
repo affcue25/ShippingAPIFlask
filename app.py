@@ -237,6 +237,32 @@ def debug_customers():
             'error': str(e)
         }), 500
 
+@app.route('/api/debug/cities', methods=['GET'])
+def debug_cities():
+    """Debug endpoint to test cities data"""
+    try:
+        # Test if cities data exists
+        query1 = "SELECT COUNT(*) as total FROM shipments WHERE consignee_city IS NOT NULL"
+        query2 = "SELECT COUNT(*) as non_empty FROM shipments WHERE consignee_city IS NOT NULL AND consignee_city != ''"
+        query3 = "SELECT consignee_city, COUNT(*) as count FROM shipments WHERE consignee_city IS NOT NULL AND consignee_city != '' GROUP BY consignee_city LIMIT 5"
+        
+        result1 = db.execute_query(query1)
+        result2 = db.execute_query(query2)
+        result3 = db.execute_query(query3)
+        
+        return jsonify({
+            'success': True,
+            'total_with_city': result1[0]['total'] if result1 else 0,
+            'non_empty_cities': result2[0]['non_empty'] if result2 else 0,
+            'sample_cities': result3,
+            'sample_count': len(result3)
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/shipments', methods=['GET'])
 def get_all_shipments():
     """
@@ -437,11 +463,34 @@ def get_recent_shipments():
     try:
         limit = int(request.args.get('limit', 20))
         
-        # Use processing_date for proper recent ordering since shipment_creation_date is varchar
+        # Use shipment_creation_date with proper varchar sorting
+        # Convert varchar date to comparable format for proper ordering
         query = """
         SELECT * FROM shipments 
-        WHERE processing_date IS NOT NULL 
-        ORDER BY processing_date DESC 
+        WHERE shipment_creation_date IS NOT NULL 
+        AND shipment_creation_date != ''
+        AND shipment_creation_date LIKE '__-___-__'
+        ORDER BY 
+            CASE 
+                WHEN shipment_creation_date LIKE '__-___-__' THEN
+                    '20' || substring(shipment_creation_date, 8, 2) || 
+                    CASE substring(shipment_creation_date, 4, 3)
+                        WHEN 'Jan' THEN '01'
+                        WHEN 'Feb' THEN '02'
+                        WHEN 'Mar' THEN '03'
+                        WHEN 'Apr' THEN '04'
+                        WHEN 'May' THEN '05'
+                        WHEN 'Jun' THEN '06'
+                        WHEN 'Jul' THEN '07'
+                        WHEN 'Aug' THEN '08'
+                        WHEN 'Sep' THEN '09'
+                        WHEN 'Oct' THEN '10'
+                        WHEN 'Nov' THEN '11'
+                        WHEN 'Dec' THEN '12'
+                    END ||
+                    substring(shipment_creation_date, 1, 2)
+                ELSE shipment_creation_date
+            END DESC
         LIMIT ?
         """
         shipments = db.execute_query(query, [limit])
@@ -562,12 +611,12 @@ def get_total_shipments():
             # Default behavior: use month filter or provided filter
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                # Use processing_date index for better performance
-                query = """
+                # Use shipment_creation_date with proper varchar handling
+                date_sql = get_date_filter_sql()
+                query = f"""
                 SELECT COUNT(*) as total 
                 FROM shipments 
-                WHERE processing_date >= %s::date 
-                AND processing_date <= %s::date
+                WHERE {date_sql} >= ? AND {date_sql} <= ?
                 """
                 params = [start_date, end_date]
                 result = db.execute_query(query, params)
@@ -596,7 +645,7 @@ def get_top_cities():
         date_filter = request.args.get('date_filter', 'month')
         limit = int(request.args.get('limit', 10))
         
-        # For large datasets, use sample-based approach
+        # Simple query first to test if data exists
         if not date_filter or date_filter == 'total':
             query = """
             SELECT 
@@ -605,6 +654,7 @@ def get_top_cities():
             FROM shipments 
             WHERE consignee_city IS NOT NULL 
             AND consignee_city != ''
+            AND consignee_city != 'NULL'
             GROUP BY consignee_city 
             ORDER BY shipment_count DESC 
             LIMIT ?
@@ -613,16 +663,17 @@ def get_top_cities():
         else:
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                # Use processing_date index for better performance
-                query = """
+                # Use shipment_creation_date with proper varchar handling
+                date_sql = get_date_filter_sql()
+                query = f"""
                 SELECT 
                     consignee_city as city,
                     COUNT(*) as shipment_count
                 FROM shipments 
-                WHERE processing_date >= %s::date 
-                AND processing_date <= %s::date
+                WHERE {date_sql} >= ? AND {date_sql} <= ?
                 AND consignee_city IS NOT NULL 
                 AND consignee_city != ''
+                AND consignee_city != 'NULL'
                 GROUP BY consignee_city 
                 ORDER BY shipment_count DESC 
                 LIMIT ?
@@ -637,6 +688,7 @@ def get_top_cities():
                 FROM shipments 
                 WHERE consignee_city IS NOT NULL 
                 AND consignee_city != ''
+                AND consignee_city != 'NULL'
                 GROUP BY consignee_city 
                 ORDER BY shipment_count DESC 
                 LIMIT ?
@@ -649,7 +701,11 @@ def get_top_cities():
             'data': cities,
             'date_filter': date_filter,
             'limit': limit,
-            'note': 'Results based on recent sample for performance'
+            'debug': {
+                'query': query,
+                'params': params,
+                'result_count': len(cities)
+            }
         })
         
     except Exception as e:
