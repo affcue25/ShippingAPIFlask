@@ -325,18 +325,23 @@ def get_all_shipments():
 @app.route('/api/shipments/filter', methods=['GET'])
 def filter_shipments():
     """
-    Filter shipments based on any column
-    Query params: column_name, value, date_filter (optional)
+    Filter shipments based on any column with pagination
+    Query params: column_name, value, date_filter (optional), page, limit
     """
     try:
         column = request.args.get('column')
         value = request.args.get('value')
         date_filter = request.args.get('date_filter')
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
         
         if not column or not value:
             return jsonify({'error': 'column and value parameters are required'}), 400
         
-        # Build query
+        # Calculate offset
+        offset = (page - 1) * limit
+        
+        # Build base query for counting
         where_clause = f" WHERE {column} LIKE ?"
         params = [f'%{value}%']
         
@@ -348,14 +353,33 @@ def filter_shipments():
                 where_clause += f" AND {date_sql} >= ? AND {date_sql} <= ?"
                 params.extend([start_date, end_date])
         
+        # Get total count
+        count_query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
+        total_count = db.execute_query(count_query, params)[0]['total']
+        
+        # Get paginated data
         date_sql = get_date_filter_sql()
-        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC"
+        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
         
         shipments = db.execute_query(query, params)
+        
+        # Calculate pagination info
+        total_pages = (total_count + limit - 1) // limit
+        has_next = page < total_pages
+        has_prev = page > 1
         
         return jsonify({
             'data': shipments,
             'count': len(shipments),
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total_count,
+                'total_pages': total_pages,
+                'has_next': has_next,
+                'has_prev': has_prev
+            },
             'filter': {
                 'column': column,
                 'value': value,
