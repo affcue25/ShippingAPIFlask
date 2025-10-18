@@ -43,9 +43,6 @@ class DatabaseManager:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         try:
-            # Convert SQLite placeholders to PostgreSQL placeholders
-            query = convert_sqlite_to_postgresql(query)
-            
             if params:
                 cursor.execute(query, params)
             else:
@@ -70,9 +67,6 @@ class DatabaseManager:
         cursor = conn.cursor()
         
         try:
-            # Convert SQLite placeholders to PostgreSQL placeholders
-            query = convert_sqlite_to_postgresql(query)
-            
             if params:
                 cursor.execute(query, params)
             else:
@@ -155,11 +149,11 @@ def parse_date_filter(date_str):
         return None, None
 
 def get_date_filter_sql():
-    """Get the SQL CASE statement for date filtering (PostgreSQL compatible)"""
+    """Get the SQL CASE statement for date filtering"""
     return """CASE 
         WHEN shipment_creation_date LIKE '__-___-__' THEN
-            '20' || substring(shipment_creation_date, 8, 2) || 
-            CASE substring(shipment_creation_date, 4, 3)
+            '20' || substr(shipment_creation_date, 8, 2) || 
+            CASE substr(shipment_creation_date, 4, 3)
                 WHEN 'Jan' THEN '01'
                 WHEN 'Feb' THEN '02'
                 WHEN 'Mar' THEN '03'
@@ -173,34 +167,9 @@ def get_date_filter_sql():
                 WHEN 'Nov' THEN '11'
                 WHEN 'Dec' THEN '12'
             END ||
-            substring(shipment_creation_date, 1, 2)
+            substr(shipment_creation_date, 1, 2)
         ELSE shipment_creation_date
     END"""
-
-def convert_sqlite_to_postgresql(query):
-    """Convert SQLite placeholders (?) to PostgreSQL placeholders (%s)"""
-    return query.replace('?', '%s')
-
-def get_weight_parsing_sql():
-    """Get SQL for parsing weight values to numeric format"""
-    return """
-    CASE 
-        WHEN shipment_weight IS NULL OR shipment_weight = '' THEN NULL
-        ELSE 
-            CAST(
-                REGEXP_REPLACE(
-                    REGEXP_REPLACE(
-                        REGEXP_REPLACE(
-                            TRIM(shipment_weight), 
-                            '[^0-9.]', '', 'g'
-                        ),
-                        '^[.]', '0.', 'g'
-                    ),
-                    '[.]$', '', 'g'
-                ) AS NUMERIC
-            )
-    END
-    """
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -451,14 +420,13 @@ def get_average_weight():
             conditions.append(f"{date_sql} >= ? AND {date_sql} <= ?")
             params.extend([start_date, end_date])
         
-        conditions.append("shipment_weight IS NOT NULL AND shipment_weight != '' AND shipment_weight ~ '[0-9]'")
+        conditions.append("shipment_weight != '' AND shipment_weight IS NOT NULL")
         
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         
-        weight_sql = get_weight_parsing_sql()
         query = f"""
         SELECT 
-            AVG({weight_sql}) as average_weight,
+            AVG(CAST(REPLACE(REPLACE(shipment_weight, 'kg', ''), 'g', '') AS REAL)) as average_weight,
             COUNT(*) as total_shipments
         FROM shipments 
         {where_clause}
@@ -612,8 +580,7 @@ def get_shipments_by_weight():
         date_filter = request.args.get('date_filter')
         limit = int(request.args.get('limit', 50))
         
-        weight_sql = get_weight_parsing_sql()
-        where_conditions = [f"{weight_sql} > ?"]
+        where_conditions = ["CAST(REPLACE(REPLACE(shipment_weight, 'kg', ''), 'g', '') AS REAL) > ?"]
         params = [min_weight]
         
         if date_filter and date_filter != 'total':
