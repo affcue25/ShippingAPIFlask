@@ -738,14 +738,21 @@ def get_top_cities():
 @app.route('/api/shipments/advanced-search', methods=['GET'])
 def advanced_search():
     """
-    Advanced search with multiple filters
-    Query params: from_city, to_city, date_filter (month), limit
+    Advanced search with multiple filters and pagination
+    Query params: from_city, to_city, shipper_name, consignee_name, min_weight, date_filter, page, limit
     """
     try:
         from_city = request.args.get('from_city')
         to_city = request.args.get('to_city')
+        shipper_name = request.args.get('shipper_name')
+        consignee_name = request.args.get('consignee_name')
+        min_weight = request.args.get('min_weight')
         date_filter = request.args.get('date_filter')
-        limit = int(request.args.get('limit', 50))
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        
+        # Calculate offset
+        offset = (page - 1) * limit
         
         where_conditions = []
         params = []
@@ -758,6 +765,23 @@ def advanced_search():
             where_conditions.append("consignee_city LIKE ?")
             params.append(f'%{to_city}%')
         
+        if shipper_name:
+            where_conditions.append("shipper_name LIKE ?")
+            params.append(f'%{shipper_name}%')
+        
+        if consignee_name:
+            where_conditions.append("consignee_name LIKE ?")
+            params.append(f'%{consignee_name}%')
+        
+        if min_weight:
+            try:
+                weight_value = float(min_weight)
+                weight_sql = get_weight_parsing_sql()
+                where_conditions.append(f"{weight_sql} >= ?")
+                params.append(weight_value)
+            except ValueError:
+                pass  # Ignore invalid weight values
+        
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
@@ -769,18 +793,39 @@ def advanced_search():
         if where_conditions:
             where_clause = " WHERE " + " AND ".join(where_conditions)
         
+        # Get total count
+        count_query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
+        total_count = db.execute_query(count_query, params)[0]['total']
+        
+        # Get paginated data
         date_sql = get_date_filter_sql()
-        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ?"
-        params.append(limit)
+        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
         
         shipments = db.execute_query(query, params)
+        
+        # Calculate pagination info
+        total_pages = (total_count + limit - 1) // limit
+        has_next = page < total_pages
+        has_prev = page > 1
         
         return jsonify({
             'data': shipments,
             'count': len(shipments),
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total_count,
+                'total_pages': total_pages,
+                'has_next': has_next,
+                'has_prev': has_prev
+            },
             'filters': {
                 'from_city': from_city,
                 'to_city': to_city,
+                'shipper_name': shipper_name,
+                'consignee_name': consignee_name,
+                'min_weight': min_weight,
                 'date_filter': date_filter
             }
         })
