@@ -237,6 +237,25 @@ def debug_customers():
             'error': str(e)
         }), 500
 
+@app.route('/api/debug/simple', methods=['GET'])
+def debug_simple():
+    """Simple debug endpoint"""
+    try:
+        # Test basic database connection
+        query = "SELECT COUNT(*) as total FROM shipments"
+        result = db.execute_query(query)
+        
+        return jsonify({
+            'success': True,
+            'total_shipments': result[0]['total'] if result else 0,
+            'message': 'Database connection working'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/shipments', methods=['GET'])
 def get_all_shipments():
     """
@@ -350,51 +369,18 @@ def get_top_customers():
         date_filter = request.args.get('date_filter')
         limit = int(request.args.get('limit', 10))
         
-        # Optimized query - use simple aggregation without complex date filtering for better performance
-        if not date_filter or date_filter == 'total':
-            # Fast query without date filtering
-            query = """
-            SELECT 
-                shipper_name,
-                COUNT(*) as shipment_count,
-                COUNT(DISTINCT consignee_name) as unique_consignees
-            FROM shipments 
-            GROUP BY shipper_name 
-            ORDER BY shipment_count DESC 
-            LIMIT ?
-            """
-            params = [limit]
-        else:
-            # Only apply date filtering if specifically requested
-            start_date, end_date = parse_date_filter(date_filter)
-            if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
-                query = f"""
-                SELECT 
-                    shipper_name,
-                    COUNT(*) as shipment_count,
-                    COUNT(DISTINCT consignee_name) as unique_consignees
-                FROM shipments 
-                {where_clause}
-                GROUP BY shipper_name 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [start_date, end_date, limit]
-            else:
-                # Fallback to simple query if date parsing fails
-                query = """
-                SELECT 
-                    shipper_name,
-                    COUNT(*) as shipment_count,
-                    COUNT(DISTINCT consignee_name) as unique_consignees
-                FROM shipments 
-                GROUP BY shipper_name 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [limit]
+        # Use simple query for better performance and reliability
+        query = """
+        SELECT 
+            shipper_name,
+            COUNT(*) as shipment_count,
+            COUNT(DISTINCT consignee_name) as unique_consignees
+        FROM shipments 
+        GROUP BY shipper_name 
+        ORDER BY shipment_count DESC 
+        LIMIT ?
+        """
+        params = [limit]
         
         customers = db.execute_query(query, params)
         
