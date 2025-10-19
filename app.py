@@ -24,6 +24,14 @@ import uuid
 app = Flask(__name__)
 CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 
+# Create saved_searches table on first request
+def ensure_saved_searches_table():
+    """Ensure saved_searches table exists"""
+    try:
+        create_saved_searches_table()
+    except Exception as e:
+        print(f"Warning: Could not create saved_searches table: {e}")
+
 # Database configuration
 from database_config import DB_CONFIG
 
@@ -110,11 +118,10 @@ def create_saved_searches_table():
         """
         db.execute_query(query)
         print("✅ Saved searches table created/verified successfully")
+        return True
     except Exception as e:
         print(f"❌ Error creating saved_searches table: {e}")
-
-# Create the table on startup
-create_saved_searches_table()
+        return False
 
 def convert_date_to_comparable(date_str):
     """Convert DD-MMM-YY format to YYYYMMDD for comparison"""
@@ -1204,6 +1211,9 @@ def download_file(filename):
 def get_saved_searches():
     """Get all saved searches"""
     try:
+        # Ensure table exists
+        ensure_saved_searches_table()
+        
         query = """
         SELECT * FROM saved_searches 
         ORDER BY last_used_at DESC, created_at DESC
@@ -1222,6 +1232,9 @@ def get_saved_searches():
 def save_search():
     """Save a new search"""
     try:
+        # Ensure table exists
+        ensure_saved_searches_table()
+        
         data = request.get_json()
         
         if not data or 'title' not in data or 'filters' not in data:
@@ -1253,6 +1266,9 @@ def save_search():
 def update_saved_search(search_id):
     """Update a saved search"""
     try:
+        # Ensure table exists
+        ensure_saved_searches_table()
+        
         data = request.get_json()
         
         if not data or 'title' not in data or 'filters' not in data:
@@ -1283,6 +1299,9 @@ def update_saved_search(search_id):
 def delete_saved_search(search_id):
     """Delete a saved search"""
     try:
+        # Ensure table exists
+        ensure_saved_searches_table()
+        
         query = "DELETE FROM saved_searches WHERE id = %s"
         db.execute_insert(query, [search_id])
         
@@ -1298,6 +1317,9 @@ def delete_saved_search(search_id):
 def update_search_usage(search_id):
     """Update search usage count and last used date"""
     try:
+        # Ensure table exists
+        ensure_saved_searches_table()
+        
         query = """
         UPDATE saved_searches 
         SET usage_count = usage_count + 1, last_used_at = CURRENT_TIMESTAMP
@@ -1311,6 +1333,24 @@ def update_search_usage(search_id):
             'message': 'Usage updated successfully'
         })
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/create-saved-searches-table', methods=['POST'])
+def create_saved_searches_table_endpoint():
+    """Manually create the saved_searches table"""
+    try:
+        success = create_saved_searches_table()
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Saved searches table created successfully'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Failed to create saved searches table'
+            }), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
