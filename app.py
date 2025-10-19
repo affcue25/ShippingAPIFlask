@@ -92,6 +92,30 @@ class DatabaseManager:
 # Initialize database manager
 db = DatabaseManager()
 
+# Create saved_searches table if it doesn't exist
+def create_saved_searches_table():
+    """Create saved_searches table if it doesn't exist"""
+    try:
+        query = """
+        CREATE TABLE IF NOT EXISTS saved_searches (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            description TEXT,
+            filters JSONB NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            usage_count INTEGER DEFAULT 0,
+            user_id VARCHAR(100) DEFAULT 'default_user'
+        )
+        """
+        db.execute_query(query)
+        print("✅ Saved searches table created/verified successfully")
+    except Exception as e:
+        print(f"❌ Error creating saved_searches table: {e}")
+
+# Create the table on startup
+create_saved_searches_table()
+
 def convert_date_to_comparable(date_str):
     """Convert DD-MMM-YY format to YYYYMMDD for comparison"""
     try:
@@ -739,15 +763,41 @@ def get_top_cities():
 def advanced_search():
     """
     Advanced search with multiple filters and pagination
-    Query params: from_city, to_city, shipper_name, consignee_name, min_weight, date_filter, page, limit
+    Query params: All search fields from the comprehensive form
     """
     try:
-        from_city = request.args.get('from_city')
-        to_city = request.args.get('to_city')
-        shipper_name = request.args.get('shipper_name')
-        consignee_name = request.args.get('consignee_name')
+        # Get all possible parameters
+        id = request.args.get('id')
+        shipment_number = request.args.get('shipment_number')
+        reference_number = request.args.get('reference_number')
+        country_code = request.args.get('country_code')
+        number_of_boxes = request.args.get('number_of_boxes')
+        description = request.args.get('description')
+        pdf_filename = request.args.get('pdf_filename')
+        
+        # Date parameters
+        creation_date_from = request.args.get('creation_date_from')
+        creation_date_to = request.args.get('creation_date_to')
+        processing_date_from = request.args.get('processing_date_from')
+        processing_date_to = request.args.get('processing_date_to')
+        
+        # Weight and payment
         min_weight = request.args.get('min_weight')
-        date_filter = request.args.get('date_filter')
+        max_weight = request.args.get('max_weight')
+        cod = request.args.get('cod')
+        
+        # Shipper data
+        shipper_name = request.args.get('shipper_name')
+        shipper_city = request.args.get('shipper_city')
+        shipper_phone = request.args.get('shipper_phone')
+        shipper_address = request.args.get('shipper_address')
+        
+        # Consignee data
+        consignee_name = request.args.get('consignee_name')
+        consignee_city = request.args.get('consignee_city')
+        consignee_phone = request.args.get('consignee_phone')
+        consignee_address = request.args.get('consignee_address')
+        
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         
@@ -757,37 +807,111 @@ def advanced_search():
         where_conditions = []
         params = []
         
-        if from_city:
-            where_conditions.append("shipper_city LIKE ?")
-            params.append(f'%{from_city}%')
+        # Shipment Information filters
+        if id:
+            where_conditions.append("id = %s")
+            params.append(int(id))
         
-        if to_city:
-            where_conditions.append("consignee_city LIKE ?")
-            params.append(f'%{to_city}%')
+        if shipment_number:
+            where_conditions.append("number_shipment LIKE %s")
+            params.append(f'%{shipment_number}%')
         
-        if shipper_name:
-            where_conditions.append("shipper_name LIKE ?")
-            params.append(f'%{shipper_name}%')
+        if reference_number:
+            where_conditions.append("shipment_reference_number LIKE %s")
+            params.append(f'%{reference_number}%')
         
-        if consignee_name:
-            where_conditions.append("consignee_name LIKE ?")
-            params.append(f'%{consignee_name}%')
+        if country_code:
+            where_conditions.append("country_code = %s")
+            params.append(country_code)
         
+        if number_of_boxes:
+            where_conditions.append("number_of_shipment_boxes = %s")
+            params.append(int(number_of_boxes))
+        
+        if description:
+            where_conditions.append("shipment_description LIKE %s")
+            params.append(f'%{description}%')
+        
+        if pdf_filename:
+            where_conditions.append("pdf_filename LIKE %s")
+            params.append(f'%{pdf_filename}%')
+        
+        # Date filters
+        if creation_date_from:
+            date_sql = get_date_filter_sql()
+            where_conditions.append(f"{date_sql} >= %s")
+            params.append(creation_date_from)
+        
+        if creation_date_to:
+            date_sql = get_date_filter_sql()
+            where_conditions.append(f"{date_sql} <= %s")
+            params.append(creation_date_to)
+        
+        if processing_date_from:
+            where_conditions.append("processing_date >= %s")
+            params.append(processing_date_from)
+        
+        if processing_date_to:
+            where_conditions.append("processing_date <= %s")
+            params.append(processing_date_to)
+        
+        # Weight filters
         if min_weight:
             try:
                 weight_value = float(min_weight)
                 weight_sql = get_weight_parsing_sql()
-                where_conditions.append(f"{weight_sql} >= ?")
+                where_conditions.append(f"{weight_sql} >= %s")
                 params.append(weight_value)
             except ValueError:
                 pass  # Ignore invalid weight values
         
-        if date_filter and date_filter != 'total':
-            start_date, end_date = parse_date_filter(date_filter)
-            if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_conditions.append(f"{date_sql} >= ? AND {date_sql} <= ?")
-                params.extend([start_date, end_date])
+        if max_weight:
+            try:
+                weight_value = float(max_weight)
+                weight_sql = get_weight_parsing_sql()
+                where_conditions.append(f"{weight_sql} <= %s")
+                params.append(weight_value)
+            except ValueError:
+                pass  # Ignore invalid weight values
+        
+        # COD filter
+        if cod:
+            where_conditions.append("cod = %s")
+            params.append(cod)
+        
+        # Shipper filters
+        if shipper_name:
+            where_conditions.append("shipper_name LIKE %s")
+            params.append(f'%{shipper_name}%')
+        
+        if shipper_city:
+            where_conditions.append("shipper_city LIKE %s")
+            params.append(f'%{shipper_city}%')
+        
+        if shipper_phone:
+            where_conditions.append("shipper_phone LIKE %s")
+            params.append(f'%{shipper_phone}%')
+        
+        if shipper_address:
+            where_conditions.append("shipper_address LIKE %s")
+            params.append(f'%{shipper_address}%')
+        
+        # Consignee filters
+        if consignee_name:
+            where_conditions.append("consignee_name LIKE %s")
+            params.append(f'%{consignee_name}%')
+        
+        if consignee_city:
+            where_conditions.append("consignee_city LIKE %s")
+            params.append(f'%{consignee_city}%')
+        
+        if consignee_phone:
+            where_conditions.append("consignee_phone LIKE %s")
+            params.append(f'%{consignee_phone}%')
+        
+        if consignee_address:
+            where_conditions.append("consignee_address LIKE %s")
+            params.append(f'%{consignee_address}%')
         
         where_clause = ""
         if where_conditions:
@@ -799,7 +923,7 @@ def advanced_search():
         
         # Get paginated data
         date_sql = get_date_filter_sql()
-        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
         
         shipments = db.execute_query(query, params)
@@ -821,12 +945,28 @@ def advanced_search():
                 'has_prev': has_prev
             },
             'filters': {
-                'from_city': from_city,
-                'to_city': to_city,
-                'shipper_name': shipper_name,
-                'consignee_name': consignee_name,
+                'id': id,
+                'shipment_number': shipment_number,
+                'reference_number': reference_number,
+                'country_code': country_code,
+                'number_of_boxes': number_of_boxes,
+                'description': description,
+                'pdf_filename': pdf_filename,
+                'creation_date_from': creation_date_from,
+                'creation_date_to': creation_date_to,
+                'processing_date_from': processing_date_from,
+                'processing_date_to': processing_date_to,
                 'min_weight': min_weight,
-                'date_filter': date_filter
+                'max_weight': max_weight,
+                'cod': cod,
+                'shipper_name': shipper_name,
+                'shipper_city': shipper_city,
+                'shipper_phone': shipper_phone,
+                'shipper_address': shipper_address,
+                'consignee_name': consignee_name,
+                'consignee_city': consignee_city,
+                'consignee_phone': consignee_phone,
+                'consignee_address': consignee_address
             }
         })
         
@@ -1055,6 +1195,121 @@ def download_file(filename):
             return jsonify({'error': 'File not found'}), 404
         
         return send_file(filepath, as_attachment=True)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Saved Searches API Endpoints
+@app.route('/api/saved-searches', methods=['GET'])
+def get_saved_searches():
+    """Get all saved searches"""
+    try:
+        query = """
+        SELECT * FROM saved_searches 
+        ORDER BY last_used_at DESC, created_at DESC
+        """
+        searches = db.execute_query(query)
+        
+        return jsonify({
+            'success': True,
+            'data': searches
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/saved-searches', methods=['POST'])
+def save_search():
+    """Save a new search"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'title' not in data or 'filters' not in data:
+            return jsonify({'error': 'title and filters are required'}), 400
+        
+        query = """
+        INSERT INTO saved_searches (title, description, filters, user_id)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+        """
+        
+        result = db.execute_insert(query, [
+            data['title'],
+            data.get('description', ''),
+            json.dumps(data['filters']),
+            'default_user'
+        ])
+        
+        return jsonify({
+            'success': True,
+            'id': result,
+            'message': 'Search saved successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/saved-searches/<int:search_id>', methods=['PUT'])
+def update_saved_search(search_id):
+    """Update a saved search"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'title' not in data or 'filters' not in data:
+            return jsonify({'error': 'title and filters are required'}), 400
+        
+        query = """
+        UPDATE saved_searches 
+        SET title = %s, description = %s, filters = %s
+        WHERE id = %s
+        """
+        
+        db.execute_insert(query, [
+            data['title'],
+            data.get('description', ''),
+            json.dumps(data['filters']),
+            search_id
+        ])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Search updated successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/saved-searches/<int:search_id>', methods=['DELETE'])
+def delete_saved_search(search_id):
+    """Delete a saved search"""
+    try:
+        query = "DELETE FROM saved_searches WHERE id = %s"
+        db.execute_insert(query, [search_id])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Search deleted successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/saved-searches/<int:search_id>/usage', methods=['PUT'])
+def update_search_usage(search_id):
+    """Update search usage count and last used date"""
+    try:
+        query = """
+        UPDATE saved_searches 
+        SET usage_count = usage_count + 1, last_used_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        
+        db.execute_insert(query, [search_id])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Usage updated successfully'
+        })
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
