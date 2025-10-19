@@ -28,12 +28,25 @@ CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 def ensure_saved_searches_table():
     """Ensure saved_searches table exists"""
     try:
+        # First check if table exists
+        check_query = """
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'saved_searches'
+        )
+        """
+        result = db.execute_query(check_query)
+        table_exists = result[0]['exists'] if result else False
+        
+        if table_exists:
+            return True
+        
+        # If table doesn't exist, try to create it
         success = create_saved_searches_table()
-        if not success:
-            print("Warning: Failed to create saved_searches table")
         return success
     except Exception as e:
-        print(f"Warning: Could not create saved_searches table: {e}")
+        print(f"Warning: Could not check/create saved_searches table: {e}")
         return False
 
 # Database configuration
@@ -123,9 +136,9 @@ def create_saved_searches_table():
             print("✅ Saved searches table already exists")
             return True
         
-        # Create the table
+        # Create the table using CREATE TABLE IF NOT EXISTS to avoid race conditions
         create_query = """
-        CREATE TABLE saved_searches (
+        CREATE TABLE IF NOT EXISTS saved_searches (
             id SERIAL PRIMARY KEY,
             title VARCHAR(255) NOT NULL,
             description TEXT,
@@ -142,6 +155,22 @@ def create_saved_searches_table():
         
     except Exception as e:
         print(f"❌ Error creating saved_searches table: {e}")
+        # Try to check if table exists after error (might have been created by another process)
+        try:
+            check_query = """
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'saved_searches'
+            )
+            """
+            result = db.execute_query(check_query)
+            table_exists = result[0]['exists'] if result else False
+            if table_exists:
+                print("✅ Table exists after error (created by another process)")
+                return True
+        except:
+            pass
         return False
 
 def convert_date_to_comparable(date_str):
@@ -1380,6 +1409,28 @@ def create_saved_searches_table_endpoint():
                 'success': False,
                 'message': 'Failed to create saved searches table'
             }), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/check-saved-searches-table', methods=['GET'])
+def check_saved_searches_table():
+    """Check if saved_searches table exists"""
+    try:
+        check_query = """
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = 'saved_searches'
+        )
+        """
+        result = db.execute_query(check_query)
+        table_exists = result[0]['exists'] if result else False
+        
+        return jsonify({
+            'success': True,
+            'table_exists': table_exists,
+            'message': 'Table exists' if table_exists else 'Table does not exist'
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
