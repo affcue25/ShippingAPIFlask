@@ -45,7 +45,7 @@ def check_dependencies():
     return True
 
 def check_database():
-    """Check if PostgreSQL database connection works"""
+    """Check if PostgreSQL database connection works and create necessary tables"""
     try:
         import psycopg2
         from database_config import DB_CONFIG
@@ -54,6 +54,10 @@ def check_database():
         conn = psycopg2.connect(**DB_CONFIG)
         cursor = conn.cursor()
         cursor.execute("SELECT 1")
+        
+        # Create saved_searches table if it doesn't exist
+        create_saved_searches_table(cursor)
+        
         cursor.close()
         conn.close()
         
@@ -67,6 +71,43 @@ def check_database():
         print(f"❌ PostgreSQL database connection failed: {e}")
         print("Make sure PostgreSQL is running and the database credentials are correct.")
         return False
+
+def create_saved_searches_table(cursor):
+    """Create saved_searches table if it doesn't exist"""
+    try:
+        # Check if table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'saved_searches'
+            )
+        """)
+        table_exists = cursor.fetchone()[0]
+        
+        if table_exists:
+            print("✅ saved_searches table already exists")
+            return
+        
+        # Create the table
+        cursor.execute("""
+            CREATE TABLE saved_searches (
+                id SERIAL PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                description TEXT,
+                filters JSONB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                usage_count INTEGER DEFAULT 0,
+                user_id VARCHAR(100) DEFAULT 'default_user'
+            )
+        """)
+        
+        print("✅ saved_searches table created successfully")
+        
+    except Exception as e:
+        print(f"❌ Error creating saved_searches table: {e}")
+        raise
 
 def start_api():
     """Start the API server"""

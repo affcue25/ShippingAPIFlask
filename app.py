@@ -24,30 +24,7 @@ import uuid
 app = Flask(__name__)
 CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 
-# Create saved_searches table on first request
-def ensure_saved_searches_table():
-    """Ensure saved_searches table exists"""
-    try:
-        # First check if table exists
-        check_query = """
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name = 'saved_searches'
-        )
-        """
-        result = db.execute_query(check_query)
-        table_exists = result[0]['exists'] if result else False
-        
-        if table_exists:
-            return True
-        
-        # If table doesn't exist, try to create it
-        success = create_saved_searches_table()
-        return success
-    except Exception as e:
-        print(f"Warning: Could not check/create saved_searches table: {e}")
-        return False
+# Table creation is now handled in start_api.py during database initialization
 
 # Database configuration
 from database_config import DB_CONFIG
@@ -117,61 +94,7 @@ class DatabaseManager:
 # Initialize database manager
 db = DatabaseManager()
 
-# Create saved_searches table if it doesn't exist
-def create_saved_searches_table():
-    """Create saved_searches table if it doesn't exist"""
-    try:
-        # First check if table exists
-        check_query = """
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name = 'saved_searches'
-        )
-        """
-        result = db.execute_query(check_query)
-        table_exists = result[0]['exists'] if result else False
-        
-        if table_exists:
-            print("✅ Saved searches table already exists")
-            return True
-        
-        # Create the table using CREATE TABLE IF NOT EXISTS to avoid race conditions
-        create_query = """
-        CREATE TABLE IF NOT EXISTS saved_searches (
-            id SERIAL PRIMARY KEY,
-            title VARCHAR(255) NOT NULL,
-            description TEXT,
-            filters JSONB NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            usage_count INTEGER DEFAULT 0,
-            user_id VARCHAR(100) DEFAULT 'default_user'
-        )
-        """
-        db.execute_query(create_query)
-        print("✅ Saved searches table created successfully")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error creating saved_searches table: {e}")
-        # Try to check if table exists after error (might have been created by another process)
-        try:
-            check_query = """
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'saved_searches'
-            )
-            """
-            result = db.execute_query(check_query)
-            table_exists = result[0]['exists'] if result else False
-            if table_exists:
-                print("✅ Table exists after error (created by another process)")
-                return True
-        except:
-            pass
-        return False
+# Table creation moved to start_api.py
 
 def convert_date_to_comparable(date_str):
     """Convert DD-MMM-YY format to YYYYMMDD for comparison"""
@@ -1261,15 +1184,6 @@ def download_file(filename):
 def get_saved_searches():
     """Get all saved searches"""
     try:
-        # Ensure table exists
-        table_created = ensure_saved_searches_table()
-        if not table_created:
-            return jsonify({
-                'success': True,
-                'data': [],
-                'message': 'Table created, no saved searches yet'
-            })
-        
         query = """
         SELECT * FROM saved_searches 
         ORDER BY last_used_at DESC, created_at DESC
@@ -1288,11 +1202,6 @@ def get_saved_searches():
 def save_search():
     """Save a new search"""
     try:
-        # Ensure table exists
-        table_created = ensure_saved_searches_table()
-        if not table_created:
-            return jsonify({'error': 'Failed to create saved_searches table'}), 500
-        
         data = request.get_json()
         
         if not data or 'title' not in data or 'filters' not in data:
@@ -1324,9 +1233,6 @@ def save_search():
 def update_saved_search(search_id):
     """Update a saved search"""
     try:
-        # Ensure table exists
-        ensure_saved_searches_table()
-        
         data = request.get_json()
         
         if not data or 'title' not in data or 'filters' not in data:
@@ -1357,9 +1263,6 @@ def update_saved_search(search_id):
 def delete_saved_search(search_id):
     """Delete a saved search"""
     try:
-        # Ensure table exists
-        ensure_saved_searches_table()
-        
         query = "DELETE FROM saved_searches WHERE id = %s"
         db.execute_insert(query, [search_id])
         
@@ -1375,9 +1278,6 @@ def delete_saved_search(search_id):
 def update_search_usage(search_id):
     """Update search usage count and last used date"""
     try:
-        # Ensure table exists
-        ensure_saved_searches_table()
-        
         query = """
         UPDATE saved_searches 
         SET usage_count = usage_count + 1, last_used_at = CURRENT_TIMESTAMP
@@ -1394,45 +1294,7 @@ def update_search_usage(search_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/create-saved-searches-table', methods=['POST'])
-def create_saved_searches_table_endpoint():
-    """Manually create the saved_searches table"""
-    try:
-        success = create_saved_searches_table()
-        if success:
-            return jsonify({
-                'success': True,
-                'message': 'Saved searches table created successfully'
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'message': 'Failed to create saved searches table'
-            }), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/check-saved-searches-table', methods=['GET'])
-def check_saved_searches_table():
-    """Check if saved_searches table exists"""
-    try:
-        check_query = """
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name = 'saved_searches'
-        )
-        """
-        result = db.execute_query(check_query)
-        table_exists = result[0]['exists'] if result else False
-        
-        return jsonify({
-            'success': True,
-            'table_exists': table_exists,
-            'message': 'Table exists' if table_exists else 'Table does not exist'
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+# Table creation is now handled in start_api.py during database initialization
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
