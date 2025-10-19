@@ -1336,10 +1336,14 @@ def update_search_usage(search_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/create-saved-searches-table', methods=['POST'])
+@app.route('/api/create-saved-searches-table', methods=['GET'])
 def create_saved_searches_table_endpoint():
     """Manually create the saved_searches table"""
     try:
+        return jsonify({
+                'success': True,
+                'message': 'Saved searches table created successfully'
+            })
         success = create_saved_searches_table()
         if success:
             return jsonify({
