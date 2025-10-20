@@ -13,6 +13,8 @@ def create_search_indexes():
     
     # Connect to database
     conn = psycopg2.connect(**DB_CONFIG)
+    # Required for CREATE INDEX CONCURRENTLY (must be outside transaction)
+    conn.autocommit = True
     cursor = conn.cursor()
     
     try:
@@ -110,8 +112,6 @@ def create_search_indexes():
         print("Updating table statistics...")
         cursor.execute("ANALYZE shipments")
         
-        # Commit all changes
-        conn.commit()
         print("✅ All search indexes created successfully!")
         
         # Display index information
