@@ -462,16 +462,21 @@ def search_shipments():
             
         else:
             # Use ILIKE pattern matching (default)
-            search_conditions = []
+            # Tokenize the query into words and require ALL words to match somewhere
+            # Build: AND over terms of (col1 ILIKE %term% OR col2 ILIKE %term% ...)
+            terms = [t for t in query.split() if t]
+            if not terms:
+                terms = [query]
+            term_groups = []
             search_params = []
-            
-            # Create ILIKE conditions for each column
-            for column in searchable_columns:
-                search_conditions.append(f"{column} ILIKE %s")
-                search_params.append(f'%{query}%')
-            
-            # Combine all search conditions with OR
-            search_clause = " OR ".join(search_conditions)
+            for term in terms:
+                per_term_conditions = []
+                for column in searchable_columns:
+                    per_term_conditions.append(f"{column} ILIKE %s")
+                    search_params.append(f'%{term}%')
+                term_groups.append("(" + " OR ".join(per_term_conditions) + ")")
+            # All terms must match (some column)
+            search_clause = " AND ".join(term_groups)
         
         # Build base WHERE clause
         where_conditions = [f"({search_clause})"]
