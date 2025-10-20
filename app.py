@@ -443,11 +443,13 @@ def search_shipments():
                 'shipment_description', 'pdf_filename'
             ]
             
-            # Build full-text search query
-            fts_query = query.replace(' ', ' & ')  # Convert to AND search
+            # Build full-text search query using web-style semantics for multi-word queries
+            # websearch_to_tsquery supports phrases and is more user-friendly than plainto_tsquery
             search_vector = " || ' ' || ".join([f"COALESCE({col}, '')" for col in search_vector_columns])
             
-            search_conditions = [f"to_tsvector('english', {search_vector}) @@ plainto_tsquery('english', %s)"]
+            search_conditions = [
+                f"to_tsvector('english', {search_vector}) @@ websearch_to_tsquery('english', %s)"
+            ]
             search_params = [query]
             
             # Add ILIKE conditions for exact matches on non-text columns
