@@ -185,43 +185,6 @@ def convert_sqlite_to_postgresql(query):
     """Convert SQLite placeholders (?) to PostgreSQL placeholders (%s)"""
     return query.replace('?', '%s')
 
-def create_search_indexes():
-    """Create indexes for fast search performance"""
-    try:
-        # Text search indexes for commonly searched columns
-        indexes = [
-            # GIN indexes for full-text search (if needed later)
-            # "CREATE INDEX IF NOT EXISTS idx_shipments_gin_shipper_name ON shipments USING gin(to_tsvector('english', shipper_name))",
-            # "CREATE INDEX IF NOT EXISTS idx_shipments_gin_consignee_name ON shipments USING gin(to_tsvector('english', consignee_name))",
-            
-            # B-tree indexes for ILIKE searches
-            "CREATE INDEX IF NOT EXISTS idx_shipments_shipper_name ON shipments (shipper_name)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_consignee_name ON shipments (consignee_name)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_shipper_city ON shipments (shipper_city)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_consignee_city ON shipments (consignee_city)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_number_shipment ON shipments (number_shipment)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_reference_number ON shipments (shipment_reference_number)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_country_code ON shipments (country_code)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_creation_date ON shipments (shipment_creation_date)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_processing_date ON shipments (processing_date)",
-            
-            # Composite indexes for common search patterns
-            "CREATE INDEX IF NOT EXISTS idx_shipments_name_city ON shipments (shipper_name, consignee_name)",
-            "CREATE INDEX IF NOT EXISTS idx_shipments_city_date ON shipments (consignee_city, shipment_creation_date)",
-        ]
-        
-        for index_sql in indexes:
-            try:
-                db.execute_insert(index_sql)
-                print(f"✅ Created index: {index_sql.split('idx_')[1].split(' ON')[0]}")
-            except Exception as e:
-                print(f"⚠️  Index creation warning: {e}")
-        
-        print("🔍 Search indexes created successfully")
-        
-    except Exception as e:
-        print(f"❌ Error creating search indexes: {e}")
-
 def get_weight_parsing_sql():
     """Get SQL for parsing weight values to numeric format"""
     return """
@@ -259,15 +222,75 @@ def health_check():
         'database': db_status
     })
 
-@app.route('/api/setup/indexes', methods=['POST'])
-def setup_search_indexes():
-    """Create search indexes for better performance"""
+@app.route('/api/search/performance', methods=['GET'])
+def search_performance():
+    """Get search performance metrics and index information"""
     try:
-        create_search_indexes()
+        # Get table statistics
+        stats_query = """
+        SELECT 
+            schemaname,
+            tablename,
+            n_tup_ins as inserts,
+            n_tup_upd as updates,
+            n_tup_del as deletes,
+            n_live_tup as live_tuples,
+            n_dead_tup as dead_tuples,
+            last_vacuum,
+            last_autovacuum,
+            last_analyze,
+            last_autoanalyze
+        FROM pg_stat_user_tables 
+        WHERE tablename = 'shipments'
+        """
+        
+        table_stats = db.execute_query(stats_query)
+        
+        # Get index information
+        index_query = """
+        SELECT 
+            indexname,
+            indexdef,
+            pg_size_pretty(pg_relation_size(indexname::regclass)) as size
+        FROM pg_indexes 
+        WHERE tablename = 'shipments' 
+        AND indexname LIKE 'idx_%'
+        ORDER BY pg_relation_size(indexname::regclass) DESC
+        """
+        
+        indexes = db.execute_query(index_query)
+        
+        # Get search performance sample (last 10 searches)
+        # This would require a search_log table in production
+        performance_info = {
+            'table_stats': table_stats[0] if table_stats else None,
+            'indexes': indexes,
+            'total_indexes': len(indexes),
+            'recommendations': []
+        }
+        
+        # Add recommendations based on data
+        if table_stats and table_stats[0]:
+            live_tuples = table_stats[0].get('live_tuples', 0)
+            if live_tuples > 1000000:  # More than 1M records
+                performance_info['recommendations'].append(
+                    "Large dataset detected. Consider using full-text search (search_type=fts) for better performance."
+                )
+                performance_info['recommendations'].append(
+                    "Ensure all search indexes are created using create_search_indexes.py"
+                )
+        
+        if len(indexes) < 10:
+            performance_info['recommendations'].append(
+                "Consider running create_search_indexes.py to create optimized search indexes."
+            )
+        
         return jsonify({
             'success': True,
-            'message': 'Search indexes created successfully'
+            'performance': performance_info,
+            'timestamp': datetime.now().isoformat()
         })
+        
     except Exception as e:
         return jsonify({
             'success': False,
@@ -381,54 +404,75 @@ def get_all_shipments():
 @app.route('/api/shipments/search', methods=['GET'])
 def search_shipments():
     """
-    Fast global search across all columns with pagination
-    Query params: search, page, limit, date_filter (optional)
+    Fast multi-column search across all shipment fields
+    Optimized for large datasets (10M+ records) with multiple search strategies
+    Query params: query, date_filter (optional), page, limit, search_type (fts/ilike)
     """
     try:
-        # Get query parameters
-        search_term = request.args.get('search', '').strip()
+        query = request.args.get('query', '').strip()
+        date_filter = request.args.get('date_filter')
+        search_type = request.args.get('search_type', 'ilike')  # 'fts' for full-text search, 'ilike' for pattern matching
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
-        date_filter = request.args.get('date_filter')
         
-        if not search_term:
-            return jsonify({'error': 'search parameter is required'}), 400
+        if not query:
+            return jsonify({'error': 'query parameter is required'}), 400
+        
+        # Limit query length for performance
+        if len(query) > 100:
+            query = query[:100]
         
         # Calculate offset
         offset = (page - 1) * limit
         
-        # Build search conditions for all searchable columns
-        search_columns = [
-            'id::text',
-            'number_shipment',
-            'shipment_reference_number',
-            'country_code',
-            'shipper_name',
-            'shipper_city',
-            'shipper_phone',
-            'shipper_address',
-            'consignee_name',
-            'consignee_city',
-            'consignee_phone',
-            'consignee_address',
-            'shipment_weight',
-            'number_of_shipment_boxes::text',
-            'shipment_description',
-            'pdf_filename',
-            'shipment_creation_date',
-            'cod::text'
+        # List of all searchable columns
+        searchable_columns = [
+            'shipper_name', 'shipper_city', 'shipper_phone', 'shipper_address',
+            'consignee_name', 'consignee_city', 'consignee_phone', 'consignee_address',
+            'number_shipment', 'shipment_reference_number', 'country_code',
+            'shipment_weight', 'shipment_description', 'pdf_filename', 'cod'
         ]
         
-        # Create search condition using ILIKE for case-insensitive search
-        search_conditions = []
-        search_params = []
+        # Build search conditions based on search type
+        if search_type == 'fts':
+            # Use full-text search for better performance on large datasets
+            # Create a search vector from all text columns
+            search_vector_columns = [
+                'shipper_name', 'shipper_city', 'shipper_address',
+                'consignee_name', 'consignee_city', 'consignee_address',
+                'shipment_description', 'pdf_filename'
+            ]
+            
+            # Build full-text search query
+            fts_query = query.replace(' ', ' & ')  # Convert to AND search
+            search_vector = " || ' ' || ".join([f"COALESCE({col}, '')" for col in search_vector_columns])
+            
+            search_conditions = [f"to_tsvector('english', {search_vector}) @@ plainto_tsquery('english', %s)"]
+            search_params = [query]
+            
+            # Add ILIKE conditions for exact matches on non-text columns
+            exact_match_columns = ['number_shipment', 'shipment_reference_number', 'country_code', 'cod']
+            for column in exact_match_columns:
+                search_conditions.append(f"{column} ILIKE %s")
+                search_params.append(f'%{query}%')
+            
+            search_clause = " OR ".join(search_conditions)
+            
+        else:
+            # Use ILIKE pattern matching (default)
+            search_conditions = []
+            search_params = []
+            
+            # Create ILIKE conditions for each column
+            for column in searchable_columns:
+                search_conditions.append(f"{column} ILIKE %s")
+                search_params.append(f'%{query}%')
+            
+            # Combine all search conditions with OR
+            search_clause = " OR ".join(search_conditions)
         
-        for column in search_columns:
-            search_conditions.append(f"{column} ILIKE %s")
-            search_params.append(f'%{search_term}%')
-        
-        # Build WHERE clause
-        where_conditions = [f"({' OR '.join(search_conditions)})"]
+        # Build base WHERE clause
+        where_conditions = [f"({search_clause})"]
         params = search_params.copy()
         
         # Add date filter if provided
@@ -441,37 +485,21 @@ def search_shipments():
         
         where_clause = " WHERE " + " AND ".join(where_conditions)
         
-        # Get total count
+        # Get total count with optimized query
         count_query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
         total_count = db.execute_query(count_query, params)[0]['total']
         
-        # Get paginated data with ranking for better relevance
+        # Get paginated data with proper ordering
         date_sql = get_date_filter_sql()
-        
-        # Create ranking query for better search results
-        ranking_conditions = []
-        for column in search_columns:
-            ranking_conditions.append(f"CASE WHEN {column} ILIKE %s THEN 3 ELSE 0 END")
-        
-        ranking_query = " + ".join(ranking_conditions)
-        
-        query = f"""
-        SELECT *, ({ranking_query}) as relevance_score
-        FROM shipments
-        {where_clause}
-        ORDER BY relevance_score DESC, {date_sql} DESC
+        query_sql = f"""
+        SELECT * FROM shipments 
+        {where_clause} 
+        ORDER BY {date_sql} DESC 
         LIMIT %s OFFSET %s
         """
-        
-        # Add ranking parameters (exact match gets higher score)
-        ranking_params = []
-        for column in search_columns:
-            ranking_params.append(f'%{search_term}%')
-        
-        params.extend(ranking_params)
         params.extend([limit, offset])
         
-        shipments = db.execute_query(query, params)
+        shipments = db.execute_query(query_sql, params)
         
         # Calculate pagination info
         total_pages = (total_count + limit - 1) // limit
@@ -480,6 +508,7 @@ def search_shipments():
         
         return jsonify({
             'data': shipments,
+            'count': len(shipments),
             'pagination': {
                 'page': page,
                 'limit': limit,
@@ -489,8 +518,10 @@ def search_shipments():
                 'has_prev': has_prev
             },
             'search': {
-                'term': search_term,
-                'date_filter': date_filter
+                'query': query,
+                'date_filter': date_filter,
+                'search_type': search_type,
+                'searched_columns': searchable_columns
             }
         })
         
@@ -500,7 +531,7 @@ def search_shipments():
 @app.route('/api/shipments/filter', methods=['GET'])
 def filter_shipments():
     """
-    Filter shipments based on any column with pagination
+    Filter shipments based on any column with pagination (legacy endpoint)
     Query params: column_name, value, date_filter (optional), page, limit
     """
     try:
@@ -517,7 +548,7 @@ def filter_shipments():
         offset = (page - 1) * limit
         
         # Build base query for counting
-        where_clause = f" WHERE {column} LIKE ?"
+        where_clause = f" WHERE {column} LIKE %s"
         params = [f'%{value}%']
         
         # Add date filter if provided
@@ -525,7 +556,7 @@ def filter_shipments():
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
                 date_sql = get_date_filter_sql()
-                where_clause += f" AND {date_sql} >= ? AND {date_sql} <= ?"
+                where_clause += f" AND {date_sql} >= %s AND {date_sql} <= %s"
                 params.extend([start_date, end_date])
         
         # Get total count
@@ -534,7 +565,7 @@ def filter_shipments():
         
         # Get paginated data
         date_sql = get_date_filter_sql()
-        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
         
         shipments = db.execute_query(query, params)
