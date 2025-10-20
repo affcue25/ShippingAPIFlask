@@ -17,6 +17,8 @@ def quick_fix_search():
     
     try:
         conn = psycopg2.connect(**DB_CONFIG)
+        # Required for CREATE INDEX CONCURRENTLY (cannot run inside a transaction)
+        conn.autocommit = True
         cursor = conn.cursor()
         
         print("🔍 Checking current database status...")
@@ -107,8 +109,6 @@ def quick_fix_search():
         # Update table statistics
         print("Updating table statistics...")
         cursor.execute("ANALYZE shipments")
-        
-        conn.commit()
         
         end_time = time.time()
         total_time = end_time - start_time
