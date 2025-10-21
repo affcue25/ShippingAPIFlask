@@ -404,9 +404,9 @@ def get_all_shipments():
 @app.route('/api/shipments/search', methods=['GET'])
 def search_shipments():
     """
-    Fast multi-column search across all shipment fields (index-backed FTS)
-    - Uses per-column GIN indexes on to_tsvector('english', column)
-    - Optional date_filter applies to indexed `processing_date`
+    Multilingual shipment search (Arabic + English)
+    - Hybrid: ILIKE (for Arabic/mixed text) + FTS (for English)
+    - Uses GIN indexes for FTS and optional trigram indexes for ILIKE
     Query params: query (required), date_filter (optional), page, limit
     """
     try:
@@ -421,22 +421,22 @@ def search_shipments():
         limit = min(max(1, int(request.args.get('limit', 20))), 100)
         offset = (page - 1) * limit
 
-        # Per-column FTS using both 'english' and 'simple' configs to handle Arabic + English
+        # Columns to search in
         text_cols = [
             'shipper_name', 'shipper_city', 'shipper_address',
             'consignee_name', 'consignee_city', 'consignee_address',
             'shipment_description', 'pdf_filename'
         ]
+
+        # Hybrid search: ILIKE (for Arabic/mixed) + FTS (for English)
         fts_terms = []
         params = []
         for col in text_cols:
-            fts_terms.append(f"to_tsvector('english', {col}) @@ websearch_to_tsquery('english', %s)")
-            params.append(query)
-            fts_terms.append(f"to_tsvector('simple', {col}) @@ websearch_to_tsquery('simple', %s)")
-            params.append(query)
+            fts_terms.append(f"({col} ILIKE %s OR to_tsvector('english', {col}) @@ websearch_to_tsquery('english', %s))")
+            params.extend([f"%{query}%", query])
         where_parts = ["(" + " OR ".join(fts_terms) + ")"]
 
-        # Fast date filtering using indexed processing_date
+        # Optional date filter
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
@@ -445,13 +445,15 @@ def search_shipments():
 
         where_clause = " WHERE " + " AND ".join(where_parts)
 
-        # Count (will use bitmap scans over the per-column GIN indexes)
+        # Count (for pagination)
         count_sql = f"SELECT COUNT(*) AS total FROM shipments{where_clause}"
-        total_count = db.execute_query(count_sql, params)[0]['total']
+        total_count_result = db.execute_query(count_sql, params)
+        total_count = total_count_result[0]['total'] if total_count_result else 0
 
-        # Data (order by indexed date, fallback by id)
+        # Fetch paginated data
         data_sql = f"""
-        SELECT * FROM shipments
+        SELECT *
+        FROM shipments
         {where_clause}
         ORDER BY processing_date DESC NULLS LAST, id DESC
         LIMIT %s OFFSET %s
@@ -460,6 +462,7 @@ def search_shipments():
         rows = db.execute_query(data_sql, data_params)
 
         total_pages = (total_count + limit - 1) // limit
+
         return jsonify({
             'data': rows,
             'count': len(rows),
@@ -474,7 +477,7 @@ def search_shipments():
             'search': {
                 'query': query,
                 'date_filter': date_filter,
-                'mode': 'fts_simple_indexed'
+                'mode': 'hybrid_fts_ilike'
             }
         })
 
