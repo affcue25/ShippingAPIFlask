@@ -404,193 +404,79 @@ def get_all_shipments():
 @app.route('/api/shipments/search', methods=['GET'])
 def search_shipments():
     """
-    Fast multi-column search across all shipment fields
-    Optimized for large datasets (10M+ records) with multiple search strategies
-    Query params: query, date_filter (optional), page, limit, search_type (fts/ilike)
+    Fast multi-column search across all shipment fields (index-backed FTS)
+    - Uses expression index `idx_shipments_fts_all`
+    - Optional date_filter applies to indexed `processing_date`
+    Query params: query (required), date_filter (optional), page, limit
     """
     try:
         query = request.args.get('query', '').strip()
-        date_filter = request.args.get('date_filter')
-        search_type = request.args.get('search_type', 'fts')  # default to FTS for speed on large datasets
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 20))
-        
         if not query:
             return jsonify({'error': 'query parameter is required'}), 400
-        
-        # Limit query length for performance
-        if len(query) > 100:
-            query = query[:100]
-        
-        # Calculate offset
+        if len(query) > 128:
+            query = query[:128]
+
+        date_filter = request.args.get('date_filter')
+        page = max(1, int(request.args.get('page', 1)))
+        limit = min(max(1, int(request.args.get('limit', 20))), 100)
         offset = (page - 1) * limit
-        
-        # List of all searchable columns
-        searchable_columns = [
-            'shipper_name', 'shipper_city', 'shipper_phone', 'shipper_address',
-            'consignee_name', 'consignee_city', 'consignee_phone', 'consignee_address',
-            'number_shipment', 'shipment_reference_number', 'country_code',
-            'shipment_weight', 'shipment_description', 'pdf_filename', 'cod'
-        ]
-        
-        # Build search conditions based on search type
-        if search_type == 'fts':
-            # Use the same expression as the index 'idx_shipments_fts_all' (simple config covers numbers/codes better)
-            search_vector_expr = (
-                "to_tsvector('simple', "
-                "COALESCE(shipper_name,'') || ' ' || COALESCE(shipper_city,'') || ' ' || COALESCE(shipper_address,'') || ' ' || "
-                "COALESCE(consignee_name,'') || ' ' || COALESCE(consignee_city,'') || ' ' || COALESCE(consignee_address,'') || ' ' || "
-                "COALESCE(shipment_description,'') || ' ' || COALESCE(pdf_filename,'') || ' ' || "
-                "COALESCE(number_shipment,'') || ' ' || COALESCE(shipment_reference_number,'') || ' ' || COALESCE(country_code,'') || ' ' || "
-                "COALESCE(shipper_phone,'') || ' ' || COALESCE(consignee_phone,'') || ' ' || COALESCE(cod,'')"
-                ")"
-            )
-            search_conditions = [
-                f"{search_vector_expr} @@ websearch_to_tsquery('simple', %s)"
-            ]
-            search_params = [query]
-            
-            # Add ILIKE conditions for exact matches on non-text columns
-            exact_match_columns = ['number_shipment', 'shipment_reference_number', 'country_code', 'cod']
-            for column in exact_match_columns:
-                search_conditions.append(f"{column} ILIKE %s")
-                search_params.append(f'%{query}%')
-            
-            search_clause = " OR ".join(search_conditions)
-            
-        else:
-            # Use ILIKE pattern matching (default)
-            # Tokenize the query into words and require ALL words to match somewhere
-            # Build: AND over terms of (col1 ILIKE %term% OR col2 ILIKE %term% ...)
-            terms = [t for t in query.split() if t]
-            if not terms:
-                terms = [query]
-            term_groups = []
-            search_params = []
-            for term in terms:
-                per_term_conditions = []
-                for column in searchable_columns:
-                    per_term_conditions.append(f"{column} ILIKE %s")
-                    search_params.append(f'%{term}%')
-                term_groups.append("(" + " OR ".join(per_term_conditions) + ")")
-            # All terms must match (some column)
-            search_clause = " AND ".join(term_groups)
-        
-        # Build base WHERE clause
-        where_conditions = [f"({search_clause})"]
-        params = search_params.copy()
-        
-        # Add date filter if provided
+
+        # Exact expression matching the FTS index (simple config works well for codes/numbers)
+        fts_vector_expr = (
+            "to_tsvector('simple', "
+            "COALESCE(shipper_name,'') || ' ' || COALESCE(shipper_city,'') || ' ' || COALESCE(shipper_address,'') || ' ' || "
+            "COALESCE(consignee_name,'') || ' ' || COALESCE(consignee_city,'') || ' ' || COALESCE(consignee_address,'') || ' ' || "
+            "COALESCE(shipment_description,'') || ' ' || COALESCE(pdf_filename,'') || ' ' || "
+            "COALESCE(number_shipment,'') || ' ' || COALESCE(shipment_reference_number,'') || ' ' || COALESCE(country_code,'') || ' ' || "
+            "COALESCE(shipper_phone,'') || ' ' || COALESCE(consignee_phone,'') || ' ' || COALESCE(cod,'')"
+            ")"
+        )
+
+        where_parts = [f"{fts_vector_expr} @@ websearch_to_tsquery('simple', %s)"]
+        params = [query]
+
+        # Fast date filtering using indexed processing_date
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_conditions.append(f"{date_sql} >= %s AND {date_sql} <= %s")
+                where_parts.append("processing_date >= %s::date AND processing_date <= %s::date")
                 params.extend([start_date, end_date])
-        
-        where_clause = " WHERE " + " AND ".join(where_conditions)
-        used_search_type = search_type
-        
-        # Execute ILIKE/FTS primary query
-        count_query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
-        total_count = db.execute_query(count_query, params)[0]['total']
-        
-        # If no results and we weren't already using FTS, try FTS as a fallback for better recall
-        if total_count == 0 and search_type != 'fts':
-            try:
-                fts_vector_cols = [
-                    'shipper_name', 'shipper_city', 'shipper_address',
-                    'consignee_name', 'consignee_city', 'consignee_address',
-                    'shipment_description', 'pdf_filename'
-                ]
-                fts_search_vector = " || ' ' || ".join([f"COALESCE({col}, '')" for col in fts_vector_cols])
-                fts_conditions = [
-                    f"to_tsvector('english', {fts_search_vector}) @@ websearch_to_tsquery('english', %s)"
-                ]
-                fts_params = [query]
-                
-                # Preserve date filter if present
-                if date_filter and date_filter != 'total':
-                    start_date, end_date = parse_date_filter(date_filter)
-                    if start_date and end_date:
-                        date_sql_inner = get_date_filter_sql()
-                        fts_conditions.append(f"{date_sql_inner} >= %s AND {date_sql_inner} <= %s")
-                        fts_params.extend([start_date, end_date])
-                
-                fts_where = " WHERE " + " AND ".join(fts_conditions)
-                fts_count_q = f"SELECT COUNT(*) as total FROM shipments{fts_where}"
-                fts_total = db.execute_query(fts_count_q, fts_params)[0]['total']
-                
-                if fts_total > 0:
-                    where_clause = fts_where
-                    params = fts_params
-                    total_count = fts_total
-                    used_search_type = 'fts_fallback'
-            except Exception:
-                # If websearch_to_tsquery isn't available, fall back to plainto_tsquery
-                try:
-                    fts_vector_cols = [
-                        'shipper_name', 'shipper_city', 'shipper_address',
-                        'consignee_name', 'consignee_city', 'consignee_address',
-                        'shipment_description', 'pdf_filename'
-                    ]
-                    fts_search_vector = " || ' ' || ".join([f"COALESCE({col}, '')" for col in fts_vector_cols])
-                    fts_conditions = [
-                        f"to_tsvector('english', {fts_search_vector}) @@ plainto_tsquery('english', %s)"
-                    ]
-                    fts_params = [query]
-                    if date_filter and date_filter != 'total':
-                        start_date, end_date = parse_date_filter(date_filter)
-                        if start_date and end_date:
-                            date_sql_inner = get_date_filter_sql()
-                            fts_conditions.append(f"{date_sql_inner} >= %s AND {date_sql_inner} <= %s")
-                            fts_params.extend([start_date, end_date])
-                    fts_where = " WHERE " + " AND ".join(fts_conditions)
-                    fts_count_q = f"SELECT COUNT(*) as total FROM shipments{fts_where}"
-                    fts_total = db.execute_query(fts_count_q, fts_params)[0]['total']
-                    if fts_total > 0:
-                        where_clause = fts_where
-                        params = fts_params
-                        total_count = fts_total
-                        used_search_type = 'fts_fallback_simple'
-                except Exception:
-                    pass
-        
-        # Get paginated data with proper ordering
-        date_sql = get_date_filter_sql()
-        query_sql = f"""
-        SELECT * FROM shipments 
-        {where_clause} 
-        ORDER BY {date_sql} DESC 
+
+        where_clause = " WHERE " + " AND ".join(where_parts)
+
+        # Count
+        count_sql = f"SELECT COUNT(*) AS total FROM shipments{where_clause}"
+        total_count = db.execute_query(count_sql, params)[0]['total']
+
+        # Data (order by indexed date, fallback by id)
+        data_sql = f"""
+        SELECT * FROM shipments
+        {where_clause}
+        ORDER BY processing_date DESC NULLS LAST, id DESC
         LIMIT %s OFFSET %s
         """
-        params_with_paging = params + [limit, offset]
-        shipments = db.execute_query(query_sql, params_with_paging)
-        
-        # Calculate pagination info
+        data_params = params + [limit, offset]
+        rows = db.execute_query(data_sql, data_params)
+
         total_pages = (total_count + limit - 1) // limit
-        has_next = page < total_pages
-        has_prev = page > 1
-        
         return jsonify({
-            'data': shipments,
-            'count': len(shipments),
+            'data': rows,
+            'count': len(rows),
             'pagination': {
                 'page': page,
                 'limit': limit,
                 'total': total_count,
                 'total_pages': total_pages,
-                'has_next': has_next,
-                'has_prev': has_prev
+                'has_next': page < total_pages,
+                'has_prev': page > 1
             },
             'search': {
                 'query': query,
                 'date_filter': date_filter,
-                'search_type': used_search_type,
-                'searched_columns': searchable_columns
+                'mode': 'fts_simple_indexed'
             }
         })
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
