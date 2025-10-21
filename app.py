@@ -396,84 +396,59 @@ def filter_shipments():
 
 @app.route('/api/shipments/search', methods=['GET'])
 def search_shipments():
-    """
-    Global multi-column search with pagination
-    Query params: query, date_filter (optional), page, limit
-    """
     try:
-        query_text = request.args.get('query', '')
-        if not query_text or not query_text.strip():
+        query = request.args.get('query', '').strip()
+        if not query:
             return jsonify({'error': 'query parameter is required'}), 400
 
+        date_filter = request.args.get('date_filter')
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         offset = (page - 1) * limit
 
-        # Columns to search across (cast non-text columns to text where appropriate)
-        search_columns = [
-            "CAST(id AS TEXT)",
-            "number_shipment",
-            "shipment_reference_number",
-            "country_code",
-            "shipper_name",
-            "shipper_city",
-            "shipper_phone",
-            "shipper_address",
-            "consignee_name",
-            "consignee_city",
-            "consignee_phone",
-            "consignee_address",
-            "shipment_description",
-            "shipment_weight",
-            "number_of_shipment_boxes",
-            "pdf_filename",
-            "shipment_creation_date",
-            "CAST(processing_date AS TEXT)"
-        ]
+        # Parse date filter (week, month, year)
+        start_date, end_date = parse_date_filter(date_filter) if date_filter and date_filter != 'total' else (None, None)
 
-        # Build WHERE clause for global search
-        like_conditions = [f"{col} ILIKE ?" for col in search_columns]
-        where_clause = " WHERE (" + " OR ".join(like_conditions) + ")"
-        params = [f"%{query_text}%" for _ in search_columns]
+        # Build WHERE clause
+        where_parts = ["search_text @@ websearch_to_tsquery('simple', %s)"]
+        params = [query]
+        if start_date and end_date:
+            where_parts.append("processing_date BETWEEN %s AND %s")
+            params.extend([start_date, end_date])
 
-        # Optional date filter on shipment_creation_date comparable format
-        date_filter = request.args.get('date_filter')
-        if date_filter and date_filter != 'total':
-            start_date, end_date = parse_date_filter(date_filter)
-            if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_clause += f" AND {date_sql} >= ? AND {date_sql} <= ?"
-                params.extend([start_date, end_date])
+        where_clause = "WHERE " + " AND ".join(where_parts)
 
-        # Total count for pagination
-        count_query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
-        total_count = db.execute_query(count_query, params)[0]['total']
+        # Count
+        count_sql = f"SELECT COUNT(*) AS total FROM shipments {where_clause}"
+        total_count = db.execute_query(count_sql, params)[0]['total']
 
-        # Fetch paginated results ordered by creation date (comparable)
-        date_sql = get_date_filter_sql()
-        data_query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
-        params_with_pagination = params + [limit, offset]
-        results = db.execute_query(data_query, params_with_pagination)
+        # Paginated results
+        data_sql = f"""
+            SELECT * FROM shipments
+            {where_clause}
+            ORDER BY processing_date DESC
+            LIMIT %s OFFSET %s
+        """
+        rows = db.execute_query(data_sql, params + [limit, offset])
 
         total_pages = (total_count + limit - 1) // limit
-        has_next = page < total_pages
-        has_prev = page > 1
 
         return jsonify({
-            'data': results,
+            'data': rows,
             'pagination': {
                 'page': page,
                 'limit': limit,
                 'total': total_count,
                 'total_pages': total_pages,
-                'has_next': has_next,
-                'has_prev': has_prev
+                'has_next': page < total_pages,
+                'has_prev': page > 1
             },
             'search': {
-                'query': query_text,
+                'query': query,
                 'date_filter': date_filter
             }
         })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
