@@ -405,7 +405,7 @@ def get_all_shipments():
 def search_shipments():
     """
     Fast multi-column search across all shipment fields (index-backed FTS)
-    - Uses expression index `idx_shipments_fts_all`
+    - Uses per-column GIN indexes on to_tsvector('english', column)
     - Optional date_filter applies to indexed `processing_date`
     Query params: query (required), date_filter (optional), page, limit
     """
@@ -421,19 +421,20 @@ def search_shipments():
         limit = min(max(1, int(request.args.get('limit', 20))), 100)
         offset = (page - 1) * limit
 
-        # Exact expression matching the FTS index (simple config works well for codes/numbers)
-        fts_vector_expr = (
-            "to_tsvector('simple', "
-            "COALESCE(shipper_name,'') || ' ' || COALESCE(shipper_city,'') || ' ' || COALESCE(shipper_address,'') || ' ' || "
-            "COALESCE(consignee_name,'') || ' ' || COALESCE(consignee_city,'') || ' ' || COALESCE(consignee_address,'') || ' ' || "
-            "COALESCE(shipment_description,'') || ' ' || COALESCE(pdf_filename,'') || ' ' || "
-            "COALESCE(number_shipment,'') || ' ' || COALESCE(shipment_reference_number,'') || ' ' || COALESCE(country_code,'') || ' ' || "
-            "COALESCE(shipper_phone,'') || ' ' || COALESCE(consignee_phone,'') || ' ' || COALESCE(cod,'')"
-            ")"
-        )
-
-        where_parts = [f"{fts_vector_expr} @@ websearch_to_tsquery('simple', %s)"]
-        params = [query]
+        # Per-column FTS using both 'english' and 'simple' configs to handle Arabic + English
+        text_cols = [
+            'shipper_name', 'shipper_city', 'shipper_address',
+            'consignee_name', 'consignee_city', 'consignee_address',
+            'shipment_description', 'pdf_filename'
+        ]
+        fts_terms = []
+        params = []
+        for col in text_cols:
+            fts_terms.append(f"to_tsvector('english', {col}) @@ websearch_to_tsquery('english', %s)")
+            params.append(query)
+            fts_terms.append(f"to_tsvector('simple', {col}) @@ websearch_to_tsquery('simple', %s)")
+            params.append(query)
+        where_parts = ["(" + " OR ".join(fts_terms) + ")"]
 
         # Fast date filtering using indexed processing_date
         if date_filter and date_filter != 'total':
@@ -444,7 +445,7 @@ def search_shipments():
 
         where_clause = " WHERE " + " AND ".join(where_parts)
 
-        # Count
+        # Count (will use bitmap scans over the per-column GIN indexes)
         count_sql = f"SELECT COUNT(*) AS total FROM shipments{where_clause}"
         total_count = db.execute_query(count_sql, params)[0]['total']
 
