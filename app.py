@@ -491,10 +491,72 @@ def search_shipments():
                 params.extend([start_date, end_date])
         
         where_clause = " WHERE " + " AND ".join(where_conditions)
+        used_search_type = search_type
         
-        # Get total count with optimized query
+        # Execute ILIKE/FTS primary query
         count_query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
         total_count = db.execute_query(count_query, params)[0]['total']
+        
+        # If no results and we weren't already using FTS, try FTS as a fallback for better recall
+        if total_count == 0 and search_type != 'fts':
+            try:
+                fts_vector_cols = [
+                    'shipper_name', 'shipper_city', 'shipper_address',
+                    'consignee_name', 'consignee_city', 'consignee_address',
+                    'shipment_description', 'pdf_filename'
+                ]
+                fts_search_vector = " || ' ' || ".join([f"COALESCE({col}, '')" for col in fts_vector_cols])
+                fts_conditions = [
+                    f"to_tsvector('english', {fts_search_vector}) @@ websearch_to_tsquery('english', %s)"
+                ]
+                fts_params = [query]
+                
+                # Preserve date filter if present
+                if date_filter and date_filter != 'total':
+                    start_date, end_date = parse_date_filter(date_filter)
+                    if start_date and end_date:
+                        date_sql_inner = get_date_filter_sql()
+                        fts_conditions.append(f"{date_sql_inner} >= %s AND {date_sql_inner} <= %s")
+                        fts_params.extend([start_date, end_date])
+                
+                fts_where = " WHERE " + " AND ".join(fts_conditions)
+                fts_count_q = f"SELECT COUNT(*) as total FROM shipments{fts_where}"
+                fts_total = db.execute_query(fts_count_q, fts_params)[0]['total']
+                
+                if fts_total > 0:
+                    where_clause = fts_where
+                    params = fts_params
+                    total_count = fts_total
+                    used_search_type = 'fts_fallback'
+            except Exception:
+                # If websearch_to_tsquery isn't available, fall back to plainto_tsquery
+                try:
+                    fts_vector_cols = [
+                        'shipper_name', 'shipper_city', 'shipper_address',
+                        'consignee_name', 'consignee_city', 'consignee_address',
+                        'shipment_description', 'pdf_filename'
+                    ]
+                    fts_search_vector = " || ' ' || ".join([f"COALESCE({col}, '')" for col in fts_vector_cols])
+                    fts_conditions = [
+                        f"to_tsvector('english', {fts_search_vector}) @@ plainto_tsquery('english', %s)"
+                    ]
+                    fts_params = [query]
+                    if date_filter and date_filter != 'total':
+                        start_date, end_date = parse_date_filter(date_filter)
+                        if start_date and end_date:
+                            date_sql_inner = get_date_filter_sql()
+                            fts_conditions.append(f"{date_sql_inner} >= %s AND {date_sql_inner} <= %s")
+                            fts_params.extend([start_date, end_date])
+                    fts_where = " WHERE " + " AND ".join(fts_conditions)
+                    fts_count_q = f"SELECT COUNT(*) as total FROM shipments{fts_where}"
+                    fts_total = db.execute_query(fts_count_q, fts_params)[0]['total']
+                    if fts_total > 0:
+                        where_clause = fts_where
+                        params = fts_params
+                        total_count = fts_total
+                        used_search_type = 'fts_fallback_simple'
+                except Exception:
+                    pass
         
         # Get paginated data with proper ordering
         date_sql = get_date_filter_sql()
@@ -504,9 +566,8 @@ def search_shipments():
         ORDER BY {date_sql} DESC 
         LIMIT %s OFFSET %s
         """
-        params.extend([limit, offset])
-        
-        shipments = db.execute_query(query_sql, params)
+        params_with_paging = params + [limit, offset]
+        shipments = db.execute_query(query_sql, params_with_paging)
         
         # Calculate pagination info
         total_pages = (total_count + limit - 1) // limit
@@ -527,7 +588,7 @@ def search_shipments():
             'search': {
                 'query': query,
                 'date_filter': date_filter,
-                'search_type': search_type,
+                'search_type': used_search_type,
                 'searched_columns': searchable_columns
             }
         })
