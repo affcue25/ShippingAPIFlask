@@ -411,7 +411,7 @@ def search_shipments():
     try:
         query = request.args.get('query', '').strip()
         date_filter = request.args.get('date_filter')
-        search_type = request.args.get('search_type', 'ilike')  # 'fts' for full-text search, 'ilike' for pattern matching
+        search_type = request.args.get('search_type', 'fts')  # default to FTS for speed on large datasets
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         
@@ -435,20 +435,18 @@ def search_shipments():
         
         # Build search conditions based on search type
         if search_type == 'fts':
-            # Use full-text search for better performance on large datasets
-            # Create a search vector from all text columns
-            search_vector_columns = [
-                'shipper_name', 'shipper_city', 'shipper_address',
-                'consignee_name', 'consignee_city', 'consignee_address',
-                'shipment_description', 'pdf_filename'
-            ]
-            
-            # Build full-text search query using web-style semantics for multi-word queries
-            # websearch_to_tsquery supports phrases and is more user-friendly than plainto_tsquery
-            search_vector = " || ' ' || ".join([f"COALESCE({col}, '')" for col in search_vector_columns])
-            
+            # Use the same expression as the index 'idx_shipments_fts_all' (simple config covers numbers/codes better)
+            search_vector_expr = (
+                "to_tsvector('simple', "
+                "COALESCE(shipper_name,'') || ' ' || COALESCE(shipper_city,'') || ' ' || COALESCE(shipper_address,'') || ' ' || "
+                "COALESCE(consignee_name,'') || ' ' || COALESCE(consignee_city,'') || ' ' || COALESCE(consignee_address,'') || ' ' || "
+                "COALESCE(shipment_description,'') || ' ' || COALESCE(pdf_filename,'') || ' ' || "
+                "COALESCE(number_shipment,'') || ' ' || COALESCE(shipment_reference_number,'') || ' ' || COALESCE(country_code,'') || ' ' || "
+                "COALESCE(shipper_phone,'') || ' ' || COALESCE(consignee_phone,'') || ' ' || COALESCE(cod,'')"
+                ")"
+            )
             search_conditions = [
-                f"to_tsvector('english', {search_vector}) @@ websearch_to_tsquery('english', %s)"
+                f"{search_vector_expr} @@ websearch_to_tsquery('simple', %s)"
             ]
             search_params = [query]
             
