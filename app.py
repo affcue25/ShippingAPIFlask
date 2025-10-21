@@ -468,7 +468,7 @@ def get_top_customers():
             # This query uses a subquery to limit the dataset first, then groups
             query = """
             WITH sample_shipments AS (
-                SELECT shipper_name, consignee_name
+                SELECT shipper_name, consignee_name, shipper_phone
                 FROM shipments 
                 WHERE shipper_name IS NOT NULL 
                 AND shipper_name != ''
@@ -477,6 +477,7 @@ def get_top_customers():
             )
             SELECT 
                 shipper_name,
+                MIN(shipper_phone) as shipper_phone,
                 COUNT(*) as shipment_count,
                 COUNT(DISTINCT consignee_name) as unique_consignees
             FROM sample_shipments
@@ -493,6 +494,7 @@ def get_top_customers():
                 query = """
                 SELECT 
                     shipper_name,
+                    MIN(shipper_phone) as shipper_phone,
                     COUNT(*) as shipment_count,
                     COUNT(DISTINCT consignee_name) as unique_consignees
                 FROM shipments 
@@ -509,7 +511,7 @@ def get_top_customers():
                 # Fallback to sample-based query
                 query = """
                 WITH sample_shipments AS (
-                    SELECT shipper_name, consignee_name
+                    SELECT shipper_name, consignee_name, shipper_phone
                     FROM shipments 
                     WHERE shipper_name IS NOT NULL 
                     AND shipper_name != ''
@@ -518,6 +520,7 @@ def get_top_customers():
                 )
                 SELECT 
                     shipper_name,
+                    MIN(shipper_phone) as shipper_phone,
                     COUNT(*) as shipment_count,
                     COUNT(DISTINCT consignee_name) as unique_consignees
                 FROM sample_shipments
