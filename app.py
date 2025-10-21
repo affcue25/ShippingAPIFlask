@@ -222,81 +222,6 @@ def health_check():
         'database': db_status
     })
 
-@app.route('/api/search/performance', methods=['GET'])
-def search_performance():
-    """Get search performance metrics and index information"""
-    try:
-        # Get table statistics
-        stats_query = """
-        SELECT 
-            schemaname,
-            tablename,
-            n_tup_ins as inserts,
-            n_tup_upd as updates,
-            n_tup_del as deletes,
-            n_live_tup as live_tuples,
-            n_dead_tup as dead_tuples,
-            last_vacuum,
-            last_autovacuum,
-            last_analyze,
-            last_autoanalyze
-        FROM pg_stat_user_tables 
-        WHERE tablename = 'shipments'
-        """
-        
-        table_stats = db.execute_query(stats_query)
-        
-        # Get index information
-        index_query = """
-        SELECT 
-            indexname,
-            indexdef,
-            pg_size_pretty(pg_relation_size(indexname::regclass)) as size
-        FROM pg_indexes 
-        WHERE tablename = 'shipments' 
-        AND indexname LIKE 'idx_%'
-        ORDER BY pg_relation_size(indexname::regclass) DESC
-        """
-        
-        indexes = db.execute_query(index_query)
-        
-        # Get search performance sample (last 10 searches)
-        # This would require a search_log table in production
-        performance_info = {
-            'table_stats': table_stats[0] if table_stats else None,
-            'indexes': indexes,
-            'total_indexes': len(indexes),
-            'recommendations': []
-        }
-        
-        # Add recommendations based on data
-        if table_stats and table_stats[0]:
-            live_tuples = table_stats[0].get('live_tuples', 0)
-            if live_tuples > 1000000:  # More than 1M records
-                performance_info['recommendations'].append(
-                    "Large dataset detected. Consider using full-text search (search_type=fts) for better performance."
-                )
-                performance_info['recommendations'].append(
-                    "Ensure all search indexes are created using create_search_indexes.py"
-                )
-        
-        if len(indexes) < 10:
-            performance_info['recommendations'].append(
-                "Consider running create_search_indexes.py to create optimized search indexes."
-            )
-        
-        return jsonify({
-            'success': True,
-            'performance': performance_info,
-            'timestamp': datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
 @app.route('/api/debug/customers', methods=['GET'])
 def debug_customers():
     """Debug endpoint to test customers query"""
@@ -401,93 +326,10 @@ def get_all_shipments():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/shipments/search', methods=['GET'])
-def search_shipments():
-    """
-    Multilingual shipment search (Arabic + English)
-    - Hybrid: ILIKE (for Arabic/mixed text) + FTS (for English)
-    - Uses GIN indexes for FTS and optional trigram indexes for ILIKE
-    Query params: query (required), date_filter (optional), page, limit
-    """
-    try:
-        query = request.args.get('query', '').strip()
-        if not query:
-            return jsonify({'error': 'query parameter is required'}), 400
-        if len(query) > 128:
-            query = query[:128]
-
-        date_filter = request.args.get('date_filter')
-        page = max(1, int(request.args.get('page', 1)))
-        limit = min(max(1, int(request.args.get('limit', 20))), 100)
-        offset = (page - 1) * limit
-
-        # Columns to search in
-        text_cols = [
-            'shipper_name', 'shipper_city', 'shipper_address',
-            'consignee_name', 'consignee_city', 'consignee_address',
-            'shipment_description', 'pdf_filename'
-        ]
-
-        # Hybrid search: ILIKE (for Arabic/mixed) + FTS (for English)
-        fts_terms = []
-        params = []
-        for col in text_cols:
-            fts_terms.append(f"({col} ILIKE %s OR to_tsvector('english', {col}) @@ websearch_to_tsquery('english', %s))")
-            params.extend([f"%{query}%", query])
-        where_parts = ["(" + " OR ".join(fts_terms) + ")"]
-
-        # Optional date filter
-        if date_filter and date_filter != 'total':
-            start_date, end_date = parse_date_filter(date_filter)
-            if start_date and end_date:
-                where_parts.append("processing_date >= %s::date AND processing_date <= %s::date")
-                params.extend([start_date, end_date])
-
-        where_clause = " WHERE " + " AND ".join(where_parts)
-
-        # Count (for pagination)
-        count_sql = f"SELECT COUNT(*) AS total FROM shipments{where_clause}"
-        total_count_result = db.execute_query(count_sql, params)
-        total_count = total_count_result[0]['total'] if total_count_result else 0
-
-        # Fetch paginated data
-        data_sql = f"""
-        SELECT *
-        FROM shipments
-        {where_clause}
-        ORDER BY processing_date DESC NULLS LAST, id DESC
-        LIMIT %s OFFSET %s
-        """
-        data_params = params + [limit, offset]
-        rows = db.execute_query(data_sql, data_params)
-
-        total_pages = (total_count + limit - 1) // limit
-
-        return jsonify({
-            'data': rows,
-            'count': len(rows),
-            'pagination': {
-                'page': page,
-                'limit': limit,
-                'total': total_count,
-                'total_pages': total_pages,
-                'has_next': page < total_pages,
-                'has_prev': page > 1
-            },
-            'search': {
-                'query': query,
-                'date_filter': date_filter,
-                'mode': 'hybrid_fts_ilike'
-            }
-        })
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/api/shipments/filter', methods=['GET'])
 def filter_shipments():
     """
-    Filter shipments based on any column with pagination (legacy endpoint)
+    Filter shipments based on any column with pagination
     Query params: column_name, value, date_filter (optional), page, limit
     """
     try:
@@ -504,7 +346,7 @@ def filter_shipments():
         offset = (page - 1) * limit
         
         # Build base query for counting
-        where_clause = f" WHERE {column} LIKE %s"
+        where_clause = f" WHERE {column} LIKE ?"
         params = [f'%{value}%']
         
         # Add date filter if provided
@@ -512,7 +354,7 @@ def filter_shipments():
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
                 date_sql = get_date_filter_sql()
-                where_clause += f" AND {date_sql} >= %s AND {date_sql} <= %s"
+                where_clause += f" AND {date_sql} >= ? AND {date_sql} <= ?"
                 params.extend([start_date, end_date])
         
         # Get total count
@@ -521,7 +363,7 @@ def filter_shipments():
         
         # Get paginated data
         date_sql = get_date_filter_sql()
-        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT %s OFFSET %s"
+        query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         
         shipments = db.execute_query(query, params)
@@ -549,6 +391,89 @@ def filter_shipments():
             }
         })
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/shipments/search', methods=['GET'])
+def search_shipments():
+    """
+    Global multi-column search with pagination
+    Query params: query, date_filter (optional), page, limit
+    """
+    try:
+        query_text = request.args.get('query', '')
+        if not query_text or not query_text.strip():
+            return jsonify({'error': 'query parameter is required'}), 400
+
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        offset = (page - 1) * limit
+
+        # Columns to search across (cast non-text columns to text where appropriate)
+        search_columns = [
+            "CAST(id AS TEXT)",
+            "number_shipment",
+            "shipment_reference_number",
+            "country_code",
+            "shipper_name",
+            "shipper_city",
+            "shipper_phone",
+            "shipper_address",
+            "consignee_name",
+            "consignee_city",
+            "consignee_phone",
+            "consignee_address",
+            "shipment_description",
+            "shipment_weight",
+            "number_of_shipment_boxes",
+            "pdf_filename",
+            "shipment_creation_date",
+            "CAST(processing_date AS TEXT)"
+        ]
+
+        # Build WHERE clause for global search
+        like_conditions = [f"{col} ILIKE ?" for col in search_columns]
+        where_clause = " WHERE (" + " OR ".join(like_conditions) + ")"
+        params = [f"%{query_text}%" for _ in search_columns]
+
+        # Optional date filter on shipment_creation_date comparable format
+        date_filter = request.args.get('date_filter')
+        if date_filter and date_filter != 'total':
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                date_sql = get_date_filter_sql()
+                where_clause += f" AND {date_sql} >= ? AND {date_sql} <= ?"
+                params.extend([start_date, end_date])
+
+        # Total count for pagination
+        count_query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
+        total_count = db.execute_query(count_query, params)[0]['total']
+
+        # Fetch paginated results ordered by creation date (comparable)
+        date_sql = get_date_filter_sql()
+        data_query = f"SELECT * FROM shipments{where_clause} ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
+        params_with_pagination = params + [limit, offset]
+        results = db.execute_query(data_query, params_with_pagination)
+
+        total_pages = (total_count + limit - 1) // limit
+        has_next = page < total_pages
+        has_prev = page > 1
+
+        return jsonify({
+            'data': results,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total_count,
+                'total_pages': total_pages,
+                'has_next': has_next,
+                'has_prev': has_prev
+            },
+            'search': {
+                'query': query_text,
+                'date_filter': date_filter
+            }
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
