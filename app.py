@@ -427,14 +427,15 @@ def search_shipments():
         limit = int(request.args.get('limit', 20))
         offset = (page - 1) * limit
 
-        # Parse date filter (week, month, year)
+        # Parse date filter (today, week, month, year) against creation date
         start_date, end_date = parse_date_filter(date_filter) if date_filter and date_filter != 'total' else (None, None)
 
         # Build WHERE clause
         where_parts = ["search_text @@ websearch_to_tsquery('simple', %s)"]
         params = [query]
         if start_date and end_date:
-            where_parts.append("processing_date BETWEEN %s AND %s")
+            date_sql = get_date_filter_sql()
+            where_parts.append(f"{date_sql} >= %s AND {date_sql} <= %s")
             params.extend([start_date, end_date])
 
         where_clause = "WHERE " + " AND ".join(where_parts)
@@ -447,7 +448,7 @@ def search_shipments():
         data_sql = f"""
             SELECT * FROM shipments
             {where_clause}
-            ORDER BY processing_date DESC
+            ORDER BY {get_date_filter_sql()} DESC
             LIMIT %s OFFSET %s
         """
         rows = db.execute_query(data_sql, params + [limit, offset])
@@ -510,19 +511,19 @@ def get_top_customers():
             """
             params = [limit]
         else:
-            # For date filtering, use the indexed date column directly
+            # For date filtering, compare by shipment creation date (varchar normalized)
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                # Use processing_date index for better performance
-                query = """
+                date_sql = get_date_filter_sql()
+                query = f"""
                 SELECT 
                     shipper_name,
                     MIN(shipper_phone) as shipper_phone,
                     COUNT(*) as shipment_count,
                     COUNT(DISTINCT consignee_name) as unique_consignees
                 FROM shipments 
-                WHERE processing_date >= %s::date 
-                AND processing_date <= %s::date
+                WHERE {date_sql} >= ? 
+                AND {date_sql} <= ?
                 AND shipper_name IS NOT NULL 
                 AND shipper_name != ''
                 GROUP BY shipper_name 
