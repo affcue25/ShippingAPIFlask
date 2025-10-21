@@ -206,6 +206,15 @@ def get_weight_parsing_sql():
     END
     """
 
+def normalize_iso_to_yyyymmdd(date_str):
+    """Normalize ISO date YYYY-MM-DD to YYYYMMDD for varchar date comparisons"""
+    try:
+        if not date_str:
+            return None
+        return date_str.replace('-', '')
+    except Exception:
+        return None
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -277,7 +286,10 @@ def get_all_shipments():
         # Get query parameters
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 10))
-        date_filter = request.args.get('date_filter')  # week, month, year, or specific date
+        date_filter = request.args.get('date_filter')  # today, week, month, year, total
+        # Custom range support
+        start_date_param = request.args.get('start_date')  # YYYY-MM-DD
+        end_date_param = request.args.get('end_date')      # YYYY-MM-DD
         
         # Calculate offset
         offset = (page - 1) * limit
@@ -288,13 +300,22 @@ def get_all_shipments():
         where_clause = ""
         params = []
         
-        # Add date filter if provided
+        # Add date filter if provided (preset)
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
                 date_sql = get_date_filter_sql()
                 where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
                 params = [start_date, end_date]
+
+        # Override with custom range if provided
+        if start_date_param and end_date_param:
+            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
+            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
+            if start_date_norm and end_date_norm:
+                date_sql = get_date_filter_sql()
+                where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
+                params = [start_date_norm, end_date_norm]
         
         # Get total count
         total_count = db.execute_query(count_query + where_clause, params)[0]['total']
@@ -460,6 +481,8 @@ def get_top_customers():
     """
     try:
         date_filter = request.args.get('date_filter')
+        start_date_param = request.args.get('start_date')
+        end_date_param = request.args.get('end_date')
         limit = int(request.args.get('limit', 10))
         
         # For large datasets, use a more efficient approach
@@ -529,6 +552,28 @@ def get_top_customers():
                 LIMIT ?
                 """
                 params = [limit]
+
+        # Custom range overrides preset
+        if start_date_param and end_date_param:
+            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
+            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
+            if start_date_norm and end_date_norm:
+                date_sql = get_date_filter_sql()
+                query = f"""
+                SELECT 
+                    shipper_name,
+                    MIN(shipper_phone) as shipper_phone,
+                    COUNT(*) as shipment_count,
+                    COUNT(DISTINCT consignee_name) as unique_consignees
+                FROM shipments 
+                WHERE {date_sql} >= ? AND {date_sql} <= ?
+                AND shipper_name IS NOT NULL 
+                AND shipper_name != ''
+                GROUP BY shipper_name 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [start_date_norm, end_date_norm, limit]
         
         # Set a timeout for the query
         customers = db.execute_query(query, params)
@@ -551,38 +596,40 @@ def get_recent_shipments():
     """
     try:
         limit = int(request.args.get('limit', 20))
+        date_filter = request.args.get('date_filter')
+        start_date_param = request.args.get('start_date')
+        end_date_param = request.args.get('end_date')
         
         # Use shipment_creation_date with proper varchar sorting
         # Convert varchar date to comparable format for proper ordering
-        query = """
+        params = []
+        where_clause = "WHERE shipment_creation_date IS NOT NULL AND shipment_creation_date != '' AND shipment_creation_date LIKE '__-___-__'"
+
+        # Apply preset filter on creation date
+        if date_filter and date_filter != 'total':
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                date_sql = get_date_filter_sql()
+                where_clause += f" AND {date_sql} >= ? AND {date_sql} <= ?"
+                params.extend([start_date, end_date])
+
+        # Custom range overrides preset
+        if start_date_param and end_date_param:
+            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
+            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
+            if start_date_norm and end_date_norm:
+                date_sql = get_date_filter_sql()
+                where_clause = f"WHERE {date_sql} >= ? AND {date_sql} <= ?"
+                params = [start_date_norm, end_date_norm]
+
+        query = f"""
         SELECT * FROM shipments 
-        WHERE shipment_creation_date IS NOT NULL 
-        AND shipment_creation_date != ''
-        AND shipment_creation_date LIKE '__-___-__'
-        ORDER BY 
-            CASE 
-                WHEN shipment_creation_date LIKE '__-___-__' THEN
-                    '20' || substring(shipment_creation_date, 8, 2) || 
-                    CASE substring(shipment_creation_date, 4, 3)
-                        WHEN 'Jan' THEN '01'
-                        WHEN 'Feb' THEN '02'
-                        WHEN 'Mar' THEN '03'
-                        WHEN 'Apr' THEN '04'
-                        WHEN 'May' THEN '05'
-                        WHEN 'Jun' THEN '06'
-                        WHEN 'Jul' THEN '07'
-                        WHEN 'Aug' THEN '08'
-                        WHEN 'Sep' THEN '09'
-                        WHEN 'Oct' THEN '10'
-                        WHEN 'Nov' THEN '11'
-                        WHEN 'Dec' THEN '12'
-                    END ||
-                    substring(shipment_creation_date, 1, 2)
-                ELSE shipment_creation_date
-            END DESC
+        {where_clause}
+        ORDER BY {get_date_filter_sql()} DESC
         LIMIT ?
         """
-        shipments = db.execute_query(query, [limit])
+        params.append(limit)
+        shipments = db.execute_query(query, params)
         
         return jsonify({
             'data': shipments,
@@ -642,7 +689,9 @@ def get_average_weight():
     Query params: date_filter (week/month/year)
     """
     try:
-        date_filter = request.args.get('date_filter', 'month')
+        date_filter = request.args.get('date_filter')
+        start_date_param = request.args.get('start_date')
+        end_date_param = request.args.get('end_date')
         
         start_date, end_date = parse_date_filter(date_filter)
         
@@ -654,6 +703,14 @@ def get_average_weight():
             date_sql = get_date_filter_sql()
             conditions.append(f"{date_sql} >= ? AND {date_sql} <= ?")
             params.extend([start_date, end_date])
+
+        # Custom range overrides preset
+        if start_date_param and end_date_param:
+            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
+            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
+            if start_date_norm and end_date_norm:
+                conditions = [f"{get_date_filter_sql()} >= ? AND {get_date_filter_sql()} <= ?"]
+                params = [start_date_norm, end_date_norm]
         
         conditions.append("shipment_weight IS NOT NULL AND shipment_weight != '' AND shipment_weight ~ '[0-9]'")
         
@@ -686,6 +743,8 @@ def get_total_shipments():
     """
     try:
         date_filter = request.args.get('date_filter', 'month')  # Default to month
+        start_date_param = request.args.get('start_date')
+        end_date_param = request.args.get('end_date')
         
         if date_filter == 'total':
             # For total count, use a fast approximation for large datasets
@@ -699,17 +758,23 @@ def get_total_shipments():
         else:
             # Default behavior: use month filter or provided filter
             start_date, end_date = parse_date_filter(date_filter)
+            params = []
             if start_date and end_date:
-                # Use shipment_creation_date with proper varchar handling
                 date_sql = get_date_filter_sql()
-                query = f"""
-                SELECT COUNT(*) as total 
-                FROM shipments 
-                WHERE {date_sql} >= ? AND {date_sql} <= ?
-                """
+                query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= ? AND {date_sql} <= ?"
                 params = [start_date, end_date]
                 result = db.execute_query(query, params)
                 total = result[0]['total'] if result else 0
+            # Custom range overrides
+            if start_date_param and end_date_param:
+                start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
+                end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
+                if start_date_norm and end_date_norm:
+                    date_sql = get_date_filter_sql()
+                    query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= ? AND {date_sql} <= ?"
+                    params = [start_date_norm, end_date_norm]
+                    result = db.execute_query(query, params)
+                    total = result[0]['total'] if result else 0
             else:
                 # Fallback to total count if date parsing fails
                 query = "SELECT COUNT(*) as total FROM shipments"
@@ -732,6 +797,8 @@ def get_top_cities():
     """
     try:
         date_filter = request.args.get('date_filter', 'month')
+        start_date_param = request.args.get('start_date')
+        end_date_param = request.args.get('end_date')
         limit = int(request.args.get('limit', 10))
         
         # Simple query first to test if data exists
@@ -783,6 +850,27 @@ def get_top_cities():
                 LIMIT ?
                 """
                 params = [limit]
+
+        # Custom range overrides preset
+        if start_date_param and end_date_param:
+            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
+            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
+            if start_date_norm and end_date_norm:
+                date_sql = get_date_filter_sql()
+                query = f"""
+                SELECT 
+                    consignee_city as city,
+                    COUNT(*) as shipment_count
+                FROM shipments 
+                WHERE {date_sql} >= ? AND {date_sql} <= ?
+                AND consignee_city IS NOT NULL 
+                AND consignee_city != ''
+                AND consignee_city != 'NULL'
+                GROUP BY consignee_city 
+                ORDER BY shipment_count DESC 
+                LIMIT ?
+                """
+                params = [start_date_norm, end_date_norm, limit]
         
         cities = db.execute_query(query, params)
         
