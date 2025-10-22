@@ -124,7 +124,7 @@ def convert_date_to_comparable(date_str):
         return None
 
 def parse_date_filter(date_str):
-    """Parse date string and return start and end dates in comparable format"""
+    """Parse date string and return start and end dates in comparable format (YYYYMMDD)"""
     if not date_str:
         return None, None
     
@@ -325,7 +325,9 @@ def get_all_shipments():
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                where_clause = " WHERE shipment_creation_date >= %s AND shipment_creation_date <= %s"
+                # Use the complex date parsing SQL for proper comparison
+                date_sql = get_date_filter_sql()
+                where_clause = f" WHERE {date_sql} >= %s AND {date_sql} <= %s"
                 params = [start_date, end_date]
 
         # Override with custom range if provided
@@ -508,21 +510,23 @@ def get_top_customers():
         where_conditions = ["shipper_name IS NOT NULL", "shipper_name != ''"]
         params = []
         
-        # Handle date filtering with direct varchar comparison (uses indexes)
+        # Handle date filtering with proper date parsing SQL
         if start_date_param and end_date_param:
             # Custom range takes priority
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                where_conditions.append("shipment_creation_date >= %s")
-                where_conditions.append("shipment_creation_date <= %s")
+                date_sql = get_date_filter_sql()
+                where_conditions.append(f"{date_sql} >= %s")
+                where_conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date_norm, end_date_norm])
         elif date_filter and date_filter != 'total':
             # Use preset date filter
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                where_conditions.append("shipment_creation_date >= %s")
-                where_conditions.append("shipment_creation_date <= %s")
+                date_sql = get_date_filter_sql()
+                where_conditions.append(f"{date_sql} >= %s")
+                where_conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date, end_date])
         
         # For large datasets, use sampling when no date filter
@@ -592,12 +596,12 @@ def get_recent_shipments():
         params = []
         where_clause = "WHERE shipment_creation_date IS NOT NULL AND shipment_creation_date != ''"
 
-        # Apply preset filter on creation date using indexed approach
+        # Apply preset filter on creation date using proper date parsing
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                # Use direct varchar comparison for indexed columns
-                where_clause += " AND shipment_creation_date >= %s AND shipment_creation_date <= %s"
+                date_sql = get_date_filter_sql()
+                where_clause += f" AND {date_sql} >= %s AND {date_sql} <= %s"
                 params.extend([start_date, end_date])
 
         # Custom range overrides preset
@@ -605,7 +609,8 @@ def get_recent_shipments():
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                where_clause = "WHERE shipment_creation_date >= %s AND shipment_creation_date <= %s"
+                date_sql = get_date_filter_sql()
+                where_clause = f"WHERE {date_sql} >= %s AND {date_sql} <= %s"
                 params = [start_date_norm, end_date_norm]
 
         # Use indexed id for ordering (much faster than date parsing)
@@ -684,21 +689,23 @@ def get_average_weight():
         conditions = ["shipment_weight IS NOT NULL", "shipment_weight != ''", "shipment_weight ~ '[0-9]'"]
         params = []
         
-        # Handle date filtering with direct varchar comparison (uses indexes)
+        # Handle date filtering with proper date parsing SQL
         if start_date_param and end_date_param:
             # Custom range takes priority
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                conditions.append("shipment_creation_date >= %s")
-                conditions.append("shipment_creation_date <= %s")
+                date_sql = get_date_filter_sql()
+                conditions.append(f"{date_sql} >= %s")
+                conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date_norm, end_date_norm])
         elif date_filter and date_filter != 'total':
             # Use preset date filter
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                conditions.append("shipment_creation_date >= %s")
-                conditions.append("shipment_creation_date <= %s")
+                date_sql = get_date_filter_sql()
+                conditions.append(f"{date_sql} >= %s")
+                conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date, end_date])
         
         where_clause = " WHERE " + " AND ".join(conditions)
@@ -744,21 +751,23 @@ def get_total_shipments():
             where_conditions = []
             params = []
             
-            # Handle date filtering with direct varchar comparison (uses indexes)
+            # Handle date filtering with proper date parsing SQL
             if start_date_param and end_date_param:
                 # Custom range takes priority
                 start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
                 end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
                 if start_date_norm and end_date_norm:
-                    where_conditions.append("shipment_creation_date >= %s")
-                    where_conditions.append("shipment_creation_date <= %s")
+                    date_sql = get_date_filter_sql()
+                    where_conditions.append(f"{date_sql} >= %s")
+                    where_conditions.append(f"{date_sql} <= %s")
                     params.extend([start_date_norm, end_date_norm])
             elif date_filter and date_filter != 'total':
                 # Use preset date filter
                 start_date, end_date = parse_date_filter(date_filter)
                 if start_date and end_date:
-                    where_conditions.append("shipment_creation_date >= %s")
-                    where_conditions.append("shipment_creation_date <= %s")
+                    date_sql = get_date_filter_sql()
+                    where_conditions.append(f"{date_sql} >= %s")
+                    where_conditions.append(f"{date_sql} <= %s")
                     params.extend([start_date, end_date])
             
             # Build final query
@@ -801,21 +810,23 @@ def get_top_cities():
         ]
         params = []
         
-        # Handle date filtering with direct varchar comparison (uses indexes)
+        # Handle date filtering with proper date parsing SQL
         if start_date_param and end_date_param:
             # Custom range takes priority
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                where_conditions.append("shipment_creation_date >= %s")
-                where_conditions.append("shipment_creation_date <= %s")
+                date_sql = get_date_filter_sql()
+                where_conditions.append(f"{date_sql} >= %s")
+                where_conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date_norm, end_date_norm])
         elif date_filter and date_filter != 'total':
             # Use preset date filter
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                where_conditions.append("shipment_creation_date >= %s")
-                where_conditions.append("shipment_creation_date <= %s")
+                date_sql = get_date_filter_sql()
+                where_conditions.append(f"{date_sql} >= %s")
+                where_conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date, end_date])
         
         # Build final query
