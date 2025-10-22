@@ -1428,12 +1428,24 @@ def download_file(filename):
 def get_custom_reports():
     """Get all custom reports"""
     try:
-        query = """
-        SELECT * FROM custom_reports 
-        WHERE is_active = true
-        ORDER BY updated_at DESC, created_at DESC
-        """
-        reports = db.execute_query(query)
+        # First check if the table exists and has the is_active column
+        try:
+            query = """
+            SELECT * FROM custom_reports 
+            WHERE is_active = true
+            ORDER BY updated_at DESC, created_at DESC
+            """
+            reports = db.execute_query(query)
+        except Exception as column_error:
+            if "column \"is_active\" does not exist" in str(column_error):
+                # Fallback query without is_active filter
+                query = """
+                SELECT * FROM custom_reports 
+                ORDER BY created_at DESC
+                """
+                reports = db.execute_query(query)
+            else:
+                raise column_error
         
         return jsonify({
             'success': True,
@@ -1447,11 +1459,22 @@ def get_custom_reports():
 def get_custom_report(report_id):
     """Get a specific custom report"""
     try:
-        query = """
-        SELECT * FROM custom_reports 
-        WHERE id = %s AND is_active = true
-        """
-        report = db.execute_query(query, [report_id])
+        # Try with is_active filter first, fallback if column doesn't exist
+        try:
+            query = """
+            SELECT * FROM custom_reports 
+            WHERE id = %s AND is_active = true
+            """
+            report = db.execute_query(query, [report_id])
+        except Exception as column_error:
+            if "column \"is_active\" does not exist" in str(column_error):
+                query = """
+                SELECT * FROM custom_reports 
+                WHERE id = %s
+                """
+                report = db.execute_query(query, [report_id])
+            else:
+                raise column_error
         
         if not report:
             return jsonify({'error': 'Report not found'}), 404
@@ -1556,11 +1579,21 @@ def run_custom_report(report_id):
     """Run a custom report and return data"""
     try:
         # Get report configuration
-        query = """
-        SELECT * FROM custom_reports 
-        WHERE id = %s AND is_active = true
-        """
-        report = db.execute_query(query, [report_id])
+        try:
+            query = """
+            SELECT * FROM custom_reports 
+            WHERE id = %s AND is_active = true
+            """
+            report = db.execute_query(query, [report_id])
+        except Exception as column_error:
+            if "column \"is_active\" does not exist" in str(column_error):
+                query = """
+                SELECT * FROM custom_reports 
+                WHERE id = %s
+                """
+                report = db.execute_query(query, [report_id])
+            else:
+                raise column_error
         
         if not report:
             return jsonify({'error': 'Report not found'}), 404
@@ -1687,14 +1720,22 @@ def get_report_templates():
 def get_scheduled_reports():
     """Get all scheduled reports"""
     try:
-        query = """
-        SELECT sr.*, cr.title as report_title, cr.description as report_description
-        FROM scheduled_reports sr
-        JOIN custom_reports cr ON sr.report_id = cr.id
-        WHERE sr.is_active = true
-        ORDER BY sr.next_run_at ASC, sr.created_at DESC
-        """
-        reports = db.execute_query(query)
+        # Try with is_active filter first, fallback if table/column doesn't exist
+        try:
+            query = """
+            SELECT sr.*, cr.title as report_title, cr.description as report_description
+            FROM scheduled_reports sr
+            JOIN custom_reports cr ON sr.report_id = cr.id
+            WHERE sr.is_active = true
+            ORDER BY sr.next_run_at ASC, sr.created_at DESC
+            """
+            reports = db.execute_query(query)
+        except Exception as table_error:
+            if "relation \"scheduled_reports\" does not exist" in str(table_error) or "column \"is_active\" does not exist" in str(table_error):
+                # Return empty array if table doesn't exist yet
+                reports = []
+            else:
+                raise table_error
         
         return jsonify({
             'success': True,
