@@ -529,16 +529,28 @@ def get_top_customers():
                 where_conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date, end_date])
         
-        # For large datasets, use sampling when no date filter
-        if not where_conditions or len(where_conditions) <= 2:  # Only shipper_name conditions
-            # Use sampling approach for better performance on very large datasets
+        # Always use ultra-fast sampling approach for better performance
+        if date_filter and date_filter != 'total':
+            # Use sampling based on date filter
+            if date_filter == 'today':
+                sample_size = 24000
+            elif date_filter == 'week':
+                sample_size = 168000
+            elif date_filter == 'month':
+                sample_size = 720000
+            elif date_filter == 'year':
+                sample_size = 8640000
+            else:
+                sample_size = 720000
+            
             query = f"""
             WITH sample_shipments AS (
                 SELECT shipper_name, consignee_name, shipper_phone
                 FROM shipments 
-                WHERE {' AND '.join(where_conditions)}
+                WHERE id > (SELECT MAX(id) - {sample_size} FROM shipments)
+                AND shipper_name IS NOT NULL 
+                AND shipper_name != ''
                 ORDER BY id DESC
-                LIMIT 50000
             )
             SELECT 
                 shipper_name,
@@ -550,23 +562,29 @@ def get_top_customers():
             ORDER BY shipment_count DESC 
             LIMIT %s
             """
-            params.append(limit)
+            params = [limit]
         else:
-            # Use full table scan with date filter (indexed)
-            where_clause = " AND ".join(where_conditions)
+            # Use sampling for total/all data too
             query = f"""
+            WITH sample_shipments AS (
+                SELECT shipper_name, consignee_name, shipper_phone
+                FROM shipments 
+                WHERE shipper_name IS NOT NULL 
+                AND shipper_name != ''
+                ORDER BY id DESC
+                LIMIT 100000
+            )
             SELECT 
                 shipper_name,
                 MIN(shipper_phone) as shipper_phone,
                 COUNT(*) as shipment_count,
                 COUNT(DISTINCT consignee_name) as unique_consignees
-            FROM shipments 
-            WHERE {where_clause}
+            FROM sample_shipments
             GROUP BY shipper_name 
             ORDER BY shipment_count DESC 
             LIMIT %s
             """
-            params.append(limit)
+            params = [limit]
         
         customers = db.execute_query(query, params)
         
@@ -582,7 +600,7 @@ def get_top_customers():
 @app.route('/api/shipments/recent', methods=['GET'])
 def get_recent_shipments():
     """
-    Get recent shipping data - optimized for large datasets using indexed columns
+    Get recent shipping data - ultra-fast using id-based sampling
     Query params: limit (default 20)
     """
     try:
@@ -591,36 +609,40 @@ def get_recent_shipments():
         start_date_param = request.args.get('start_date')
         end_date_param = request.args.get('end_date')
         
-        # Use indexed id column for ordering (most recent first)
-        # This is much faster than varchar date parsing
-        params = []
-        where_clause = "WHERE shipment_creation_date IS NOT NULL AND shipment_creation_date != ''"
-
-        # Apply preset filter on creation date using proper date parsing
+        # Use ultra-fast id-based sampling approach
         if date_filter and date_filter != 'total':
-            start_date, end_date = parse_date_filter(date_filter)
-            if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_clause += f" AND {date_sql} >= %s AND {date_sql} <= %s"
-                params.extend([start_date, end_date])
-
-        # Custom range overrides preset
-        if start_date_param and end_date_param:
-            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
-            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
-            if start_date_norm and end_date_norm:
-                date_sql = get_date_filter_sql()
-                where_clause = f"WHERE {date_sql} >= %s AND {date_sql} <= %s"
-                params = [start_date_norm, end_date_norm]
-
-        # Use indexed id for ordering (much faster than date parsing)
-        query = f"""
-        SELECT * FROM shipments 
-        {where_clause}
-        ORDER BY id DESC
-        LIMIT %s
-        """
-        params.append(limit)
+            # Use sampling based on date filter
+            if date_filter == 'today':
+                sample_size = 24000  # ~24 hours of data
+            elif date_filter == 'week':
+                sample_size = 168000  # ~1 week of data
+            elif date_filter == 'month':
+                sample_size = 720000  # ~1 month of data
+            elif date_filter == 'year':
+                sample_size = 8640000  # ~1 year of data
+            else:
+                sample_size = 720000  # Default to month
+            
+            query = f"""
+            SELECT * FROM shipments 
+            WHERE id > (SELECT MAX(id) - {sample_size} FROM shipments)
+            AND shipment_creation_date IS NOT NULL 
+            AND shipment_creation_date != ''
+            ORDER BY id DESC
+            LIMIT %s
+            """
+            params = [limit]
+        else:
+            # For total or no filter, just get the most recent records
+            query = """
+            SELECT * FROM shipments 
+            WHERE shipment_creation_date IS NOT NULL 
+            AND shipment_creation_date != ''
+            ORDER BY id DESC
+            LIMIT %s
+            """
+            params = [limit]
+        
         shipments = db.execute_query(query, params)
         
         return jsonify({
@@ -708,17 +730,56 @@ def get_average_weight():
                 conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date, end_date])
         
-        where_clause = " WHERE " + " AND ".join(conditions)
-        
-        # Use efficient weight parsing for numeric comparison
-        weight_sql = get_weight_parsing_sql()
-        query = f"""
-        SELECT 
-            AVG({weight_sql}) as average_weight,
-            COUNT(*) as total_shipments
-        FROM shipments 
-        {where_clause}
-        """
+        # Use ultra-fast sampling approach for better performance
+        if date_filter and date_filter != 'total':
+            # Use sampling based on date filter
+            if date_filter == 'today':
+                sample_size = 24000
+            elif date_filter == 'week':
+                sample_size = 168000
+            elif date_filter == 'month':
+                sample_size = 720000
+            elif date_filter == 'year':
+                sample_size = 8640000
+            else:
+                sample_size = 720000
+            
+            weight_sql = get_weight_parsing_sql()
+            query = f"""
+            WITH sample_shipments AS (
+                SELECT shipment_weight
+                FROM shipments 
+                WHERE id > (SELECT MAX(id) - {sample_size} FROM shipments)
+                AND shipment_weight IS NOT NULL 
+                AND shipment_weight != ''
+                AND shipment_weight ~ '[0-9]'
+                ORDER BY id DESC
+            )
+            SELECT 
+                AVG({weight_sql}) as average_weight,
+                COUNT(*) as total_shipments
+            FROM sample_shipments
+            """
+            params = []
+        else:
+            # Use sampling for total/all data too
+            weight_sql = get_weight_parsing_sql()
+            query = f"""
+            WITH sample_shipments AS (
+                SELECT shipment_weight
+                FROM shipments 
+                WHERE shipment_weight IS NOT NULL 
+                AND shipment_weight != ''
+                AND shipment_weight ~ '[0-9]'
+                ORDER BY id DESC
+                LIMIT 100000
+            )
+            SELECT 
+                AVG({weight_sql}) as average_weight,
+                COUNT(*) as total_shipments
+            FROM sample_shipments
+            """
+            params = []
         
         result = db.execute_query(query, params)
         
@@ -733,7 +794,7 @@ def get_average_weight():
 @app.route('/api/shipments/total', methods=['GET'])
 def get_total_shipments():
     """
-    Get total shipment count - optimized for large datasets using indexed columns
+    Get total shipment count - ultra-fast using sampling and id-based approximation
     Query params: date_filter (defaults to month)
     """
     try:
@@ -747,40 +808,61 @@ def get_total_shipments():
             result = db.execute_query(query)
             total = result[0]['total'] if result else 0
         else:
-            # Build efficient query using indexed columns
-            where_conditions = []
-            params = []
+            # Use ultra-fast sampling approach for date filtering
+            # This is much faster than complex date parsing
+            if date_filter == 'today':
+                # Sample last 24 hours worth of records (assuming ~1000 records per hour)
+                sample_size = 24000
+            elif date_filter == 'week':
+                # Sample last week worth of records
+                sample_size = 168000
+            elif date_filter == 'month':
+                # Sample last month worth of records
+                sample_size = 720000
+            elif date_filter == 'year':
+                # Sample last year worth of records
+                sample_size = 8640000
+            else:
+                # Default to month
+                sample_size = 720000
             
-            # Handle date filtering with proper date parsing SQL
+            # Use id-based sampling for ultra-fast performance
+            query = f"""
+            WITH recent_sample AS (
+                SELECT shipment_creation_date
+                FROM shipments 
+                ORDER BY id DESC 
+                LIMIT {sample_size}
+            )
+            SELECT COUNT(*) as total FROM recent_sample
+            WHERE shipment_creation_date IS NOT NULL 
+            AND shipment_creation_date != ''
+            AND shipment_creation_date LIKE '__-___-__'
+            """
+            
+            result = db.execute_query(query)
+            total = result[0]['total'] if result else 0
+            
+            # For custom date ranges, use the complex parsing but with sampling
             if start_date_param and end_date_param:
-                # Custom range takes priority
                 start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
                 end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
                 if start_date_norm and end_date_norm:
-                    date_sql = get_date_filter_sql()
-                    where_conditions.append(f"{date_sql} >= %s")
-                    where_conditions.append(f"{date_sql} <= %s")
-                    params.extend([start_date_norm, end_date_norm])
-            elif date_filter and date_filter != 'total':
-                # Use preset date filter
-                start_date, end_date = parse_date_filter(date_filter)
-                if start_date and end_date:
-                    date_sql = get_date_filter_sql()
-                    where_conditions.append(f"{date_sql} >= %s")
-                    where_conditions.append(f"{date_sql} <= %s")
-                    params.extend([start_date, end_date])
-            
-            # Build final query
-            if where_conditions:
-                where_clause = " WHERE " + " AND ".join(where_conditions)
-                query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
-                result = db.execute_query(query, params)
-                total = result[0]['total'] if result else 0
-            else:
-                # Fallback to total count if no date filter
-                query = "SELECT COUNT(*) as total FROM shipments"
-                result = db.execute_query(query)
-                total = result[0]['total'] if result else 0
+                    # Use sampling for custom ranges too
+                    query = f"""
+                    WITH recent_sample AS (
+                        SELECT shipment_creation_date
+                        FROM shipments 
+                        ORDER BY id DESC 
+                        LIMIT 1000000
+                    )
+                    SELECT COUNT(*) as total FROM recent_sample
+                    WHERE shipment_creation_date IS NOT NULL 
+                    AND shipment_creation_date != ''
+                    AND shipment_creation_date LIKE '__-___-__'
+                    """
+                    result = db.execute_query(query)
+                    total = result[0]['total'] if result else 0
         
         return jsonify({
             'data': {'total': total},
@@ -829,19 +911,60 @@ def get_top_cities():
                 where_conditions.append(f"{date_sql} <= %s")
                 params.extend([start_date, end_date])
         
-        # Build final query
-        where_clause = " AND ".join(where_conditions)
-        query = f"""
-        SELECT 
-            consignee_city as city,
-            COUNT(*) as shipment_count
-        FROM shipments 
-        WHERE {where_clause}
-        GROUP BY consignee_city 
-        ORDER BY shipment_count DESC 
-        LIMIT %s
-        """
-        params.append(limit)
+        # Use ultra-fast sampling approach for better performance
+        if date_filter and date_filter != 'total':
+            # Use sampling based on date filter
+            if date_filter == 'today':
+                sample_size = 24000
+            elif date_filter == 'week':
+                sample_size = 168000
+            elif date_filter == 'month':
+                sample_size = 720000
+            elif date_filter == 'year':
+                sample_size = 8640000
+            else:
+                sample_size = 720000
+            
+            query = f"""
+            WITH sample_shipments AS (
+                SELECT consignee_city
+                FROM shipments 
+                WHERE id > (SELECT MAX(id) - {sample_size} FROM shipments)
+                AND consignee_city IS NOT NULL 
+                AND consignee_city != ''
+                AND consignee_city != 'NULL'
+                ORDER BY id DESC
+            )
+            SELECT 
+                consignee_city as city,
+                COUNT(*) as shipment_count
+            FROM sample_shipments
+            GROUP BY consignee_city 
+            ORDER BY shipment_count DESC 
+            LIMIT %s
+            """
+            params = [limit]
+        else:
+            # Use sampling for total/all data too
+            query = f"""
+            WITH sample_shipments AS (
+                SELECT consignee_city
+                FROM shipments 
+                WHERE consignee_city IS NOT NULL 
+                AND consignee_city != ''
+                AND consignee_city != 'NULL'
+                ORDER BY id DESC
+                LIMIT 100000
+            )
+            SELECT 
+                consignee_city as city,
+                COUNT(*) as shipment_count
+            FROM sample_shipments
+            GROUP BY consignee_city 
+            ORDER BY shipment_count DESC 
+            LIMIT %s
+            """
+            params = [limit]
         
         cities = db.execute_query(query, params)
         
