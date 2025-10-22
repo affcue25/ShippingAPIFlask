@@ -321,12 +321,11 @@ def get_all_shipments():
         where_clause = ""
         params = []
         
-        # Add date filter if provided (preset)
+        # Add date filter if provided (preset) - use indexed columns
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
+                where_clause = " WHERE shipment_creation_date >= %s AND shipment_creation_date <= %s"
                 params = [start_date, end_date]
 
         # Override with custom range if provided
@@ -334,16 +333,14 @@ def get_all_shipments():
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                date_sql = get_date_filter_sql()
-                where_clause = f" WHERE {date_sql} >= ? AND {date_sql} <= ?"
+                where_clause = " WHERE shipment_creation_date >= %s AND shipment_creation_date <= %s"
                 params = [start_date_norm, end_date_norm]
         
         # Get total count
         total_count = db.execute_query(count_query + where_clause, params)[0]['total']
         
-        # Get paginated data
-        date_sql = get_date_filter_sql()
-        query = base_query + where_clause + f" ORDER BY {date_sql} DESC LIMIT ? OFFSET ?"
+        # Get paginated data - use indexed id for ordering (much faster)
+        query = base_query + where_clause + " ORDER BY id DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
         
         shipments = db.execute_query(query, params)
@@ -498,7 +495,7 @@ def search_shipments():
 @app.route('/api/customers/top', methods=['GET'])
 def get_top_customers():
     """
-    Get top customers by shipment count - optimized for large datasets (10M+ records)
+    Get top customers by shipment count - optimized for large datasets using indexed columns
     Query params: date_filter (week/month/year), limit (default 10)
     """
     try:
@@ -507,18 +504,37 @@ def get_top_customers():
         end_date_param = request.args.get('end_date')
         limit = int(request.args.get('limit', 10))
         
-        # For large datasets, use a more efficient approach
-        if not date_filter or date_filter == 'total':
-            # Use a sample-based approach for better performance on large datasets
-            # This query uses a subquery to limit the dataset first, then groups
-            query = """
+        # Build efficient query using indexed columns
+        where_conditions = ["shipper_name IS NOT NULL", "shipper_name != ''"]
+        params = []
+        
+        # Handle date filtering with direct varchar comparison (uses indexes)
+        if start_date_param and end_date_param:
+            # Custom range takes priority
+            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
+            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
+            if start_date_norm and end_date_norm:
+                where_conditions.append("shipment_creation_date >= %s")
+                where_conditions.append("shipment_creation_date <= %s")
+                params.extend([start_date_norm, end_date_norm])
+        elif date_filter and date_filter != 'total':
+            # Use preset date filter
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                where_conditions.append("shipment_creation_date >= %s")
+                where_conditions.append("shipment_creation_date <= %s")
+                params.extend([start_date, end_date])
+        
+        # For large datasets, use sampling when no date filter
+        if not where_conditions or len(where_conditions) <= 2:  # Only shipper_name conditions
+            # Use sampling approach for better performance on very large datasets
+            query = f"""
             WITH sample_shipments AS (
                 SELECT shipper_name, consignee_name, shipper_phone
                 FROM shipments 
-                WHERE shipper_name IS NOT NULL 
-                AND shipper_name != ''
+                WHERE {' AND '.join(where_conditions)}
                 ORDER BY id DESC
-                LIMIT 100000
+                LIMIT 50000
             )
             SELECT 
                 shipper_name,
@@ -528,83 +544,32 @@ def get_top_customers():
             FROM sample_shipments
             GROUP BY shipper_name 
             ORDER BY shipment_count DESC 
-            LIMIT ?
+            LIMIT %s
             """
-            params = [limit]
+            params.append(limit)
         else:
-            # For date filtering, compare by shipment creation date (varchar normalized)
-            start_date, end_date = parse_date_filter(date_filter)
-            if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                query = f"""
-                SELECT 
-                    shipper_name,
-                    MIN(shipper_phone) as shipper_phone,
-                    COUNT(*) as shipment_count,
-                    COUNT(DISTINCT consignee_name) as unique_consignees
-                FROM shipments 
-                WHERE {date_sql} >= ? 
-                AND {date_sql} <= ?
-                AND shipper_name IS NOT NULL 
-                AND shipper_name != ''
-                GROUP BY shipper_name 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [start_date, end_date, limit]
-            else:
-                # Fallback to sample-based query
-                query = """
-                WITH sample_shipments AS (
-                    SELECT shipper_name, consignee_name, shipper_phone
-                    FROM shipments 
-                    WHERE shipper_name IS NOT NULL 
-                    AND shipper_name != ''
-                    ORDER BY id DESC
-                    LIMIT 100000
-                )
-                SELECT 
-                    shipper_name,
-                    MIN(shipper_phone) as shipper_phone,
-                    COUNT(*) as shipment_count,
-                    COUNT(DISTINCT consignee_name) as unique_consignees
-                FROM sample_shipments
-                GROUP BY shipper_name 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [limit]
-
-        # Custom range overrides preset
-        if start_date_param and end_date_param:
-            start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
-            end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
-            if start_date_norm and end_date_norm:
-                date_sql = get_date_filter_sql()
-                query = f"""
-                SELECT 
-                    shipper_name,
-                    MIN(shipper_phone) as shipper_phone,
-                    COUNT(*) as shipment_count,
-                    COUNT(DISTINCT consignee_name) as unique_consignees
-                FROM shipments 
-                WHERE {date_sql} >= ? AND {date_sql} <= ?
-                AND shipper_name IS NOT NULL 
-                AND shipper_name != ''
-                GROUP BY shipper_name 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [start_date_norm, end_date_norm, limit]
+            # Use full table scan with date filter (indexed)
+            where_clause = " AND ".join(where_conditions)
+            query = f"""
+            SELECT 
+                shipper_name,
+                MIN(shipper_phone) as shipper_phone,
+                COUNT(*) as shipment_count,
+                COUNT(DISTINCT consignee_name) as unique_consignees
+            FROM shipments 
+            WHERE {where_clause}
+            GROUP BY shipper_name 
+            ORDER BY shipment_count DESC 
+            LIMIT %s
+            """
+            params.append(limit)
         
-        # Set a timeout for the query
         customers = db.execute_query(query, params)
         
         return jsonify({
             'data': customers,
             'date_filter': date_filter,
-            'limit': limit,
-            'note': 'Results based on recent sample for performance'
+            'limit': limit
         })
         
     except Exception as e:
@@ -613,7 +578,7 @@ def get_top_customers():
 @app.route('/api/shipments/recent', methods=['GET'])
 def get_recent_shipments():
     """
-    Get recent shipping data - optimized for large datasets
+    Get recent shipping data - optimized for large datasets using indexed columns
     Query params: limit (default 20)
     """
     try:
@@ -622,17 +587,17 @@ def get_recent_shipments():
         start_date_param = request.args.get('start_date')
         end_date_param = request.args.get('end_date')
         
-        # Use shipment_creation_date with proper varchar sorting
-        # Convert varchar date to comparable format for proper ordering
+        # Use indexed id column for ordering (most recent first)
+        # This is much faster than varchar date parsing
         params = []
-        where_clause = "WHERE shipment_creation_date IS NOT NULL AND shipment_creation_date != '' AND shipment_creation_date LIKE '__-___-__'"
+        where_clause = "WHERE shipment_creation_date IS NOT NULL AND shipment_creation_date != ''"
 
-        # Apply preset filter on creation date
+        # Apply preset filter on creation date using indexed approach
         if date_filter and date_filter != 'total':
             start_date, end_date = parse_date_filter(date_filter)
             if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_clause += f" AND {date_sql} >= ? AND {date_sql} <= ?"
+                # Use direct varchar comparison for indexed columns
+                where_clause += " AND shipment_creation_date >= %s AND shipment_creation_date <= %s"
                 params.extend([start_date, end_date])
 
         # Custom range overrides preset
@@ -640,15 +605,15 @@ def get_recent_shipments():
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                date_sql = get_date_filter_sql()
-                where_clause = f"WHERE {date_sql} >= ? AND {date_sql} <= ?"
+                where_clause = "WHERE shipment_creation_date >= %s AND shipment_creation_date <= %s"
                 params = [start_date_norm, end_date_norm]
 
+        # Use indexed id for ordering (much faster than date parsing)
         query = f"""
         SELECT * FROM shipments 
         {where_clause}
-        ORDER BY {get_date_filter_sql()} DESC
-        LIMIT ?
+        ORDER BY id DESC
+        LIMIT %s
         """
         params.append(limit)
         shipments = db.execute_query(query, params)
@@ -707,7 +672,7 @@ def get_shipments_by_city():
 @app.route('/api/shipments/average-weight', methods=['GET'])
 def get_average_weight():
     """
-    Get average shipment weight
+    Get average shipment weight - optimized using indexed columns
     Query params: date_filter (week/month/year)
     """
     try:
@@ -715,29 +680,30 @@ def get_average_weight():
         start_date_param = request.args.get('start_date')
         end_date_param = request.args.get('end_date')
         
-        start_date, end_date = parse_date_filter(date_filter)
-        
-        # Build the complete WHERE clause
-        conditions = []
+        # Build efficient WHERE clause using indexed columns
+        conditions = ["shipment_weight IS NOT NULL", "shipment_weight != ''", "shipment_weight ~ '[0-9]'"]
         params = []
         
-        if start_date and end_date:
-            date_sql = get_date_filter_sql()
-            conditions.append(f"{date_sql} >= ? AND {date_sql} <= ?")
-            params.extend([start_date, end_date])
-
-        # Custom range overrides preset
+        # Handle date filtering with direct varchar comparison (uses indexes)
         if start_date_param and end_date_param:
+            # Custom range takes priority
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                conditions = [f"{get_date_filter_sql()} >= ? AND {get_date_filter_sql()} <= ?"]
-                params = [start_date_norm, end_date_norm]
+                conditions.append("shipment_creation_date >= %s")
+                conditions.append("shipment_creation_date <= %s")
+                params.extend([start_date_norm, end_date_norm])
+        elif date_filter and date_filter != 'total':
+            # Use preset date filter
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                conditions.append("shipment_creation_date >= %s")
+                conditions.append("shipment_creation_date <= %s")
+                params.extend([start_date, end_date])
         
-        conditions.append("shipment_weight IS NOT NULL AND shipment_weight != '' AND shipment_weight ~ '[0-9]'")
+        where_clause = " WHERE " + " AND ".join(conditions)
         
-        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
-        
+        # Use efficient weight parsing for numeric comparison
         weight_sql = get_weight_parsing_sql()
         query = f"""
         SELECT 
@@ -760,7 +726,7 @@ def get_average_weight():
 @app.route('/api/shipments/total', methods=['GET'])
 def get_total_shipments():
     """
-    Get total shipment count - optimized for large datasets
+    Get total shipment count - optimized for large datasets using indexed columns
     Query params: date_filter (defaults to month)
     """
     try:
@@ -778,35 +744,38 @@ def get_total_shipments():
             result = db.execute_query(query)
             total = result[0]['total_count'] if result else 0
         else:
-            # Handle custom date range first (highest priority)
+            # Build efficient query using indexed columns
+            where_conditions = []
+            params = []
+            
+            # Handle date filtering with direct varchar comparison (uses indexes)
             if start_date_param and end_date_param:
+                # Custom range takes priority
                 start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
                 end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
                 if start_date_norm and end_date_norm:
-                    date_sql = get_date_filter_sql()
-                    query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= %s AND {date_sql} <= %s"
-                    params = [start_date_norm, end_date_norm]
-                    result = db.execute_query(query, params)
-                    total = result[0]['total'] if result else 0
-                else:
-                    # Fallback to total count if custom range parsing fails
-                    query = "SELECT COUNT(*) as total FROM shipments"
-                    result = db.execute_query(query)
-                    total = result[0]['total'] if result else 0
-            else:
-                # Use preset date filter (today, week, month, year)
+                    where_conditions.append("shipment_creation_date >= %s")
+                    where_conditions.append("shipment_creation_date <= %s")
+                    params.extend([start_date_norm, end_date_norm])
+            elif date_filter and date_filter != 'total':
+                # Use preset date filter
                 start_date, end_date = parse_date_filter(date_filter)
                 if start_date and end_date:
-                    date_sql = get_date_filter_sql()
-                    query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= %s AND {date_sql} <= %s"
-                    params = [start_date, end_date]
-                    result = db.execute_query(query, params)
-                    total = result[0]['total'] if result else 0
-                else:
-                    # Fallback to total count if date parsing fails
-                    query = "SELECT COUNT(*) as total FROM shipments"
-                    result = db.execute_query(query)
-                    total = result[0]['total'] if result else 0
+                    where_conditions.append("shipment_creation_date >= %s")
+                    where_conditions.append("shipment_creation_date <= %s")
+                    params.extend([start_date, end_date])
+            
+            # Build final query
+            if where_conditions:
+                where_clause = " WHERE " + " AND ".join(where_conditions)
+                query = f"SELECT COUNT(*) as total FROM shipments{where_clause}"
+                result = db.execute_query(query, params)
+                total = result[0]['total'] if result else 0
+            else:
+                # Fallback to total count if no date filter
+                query = "SELECT COUNT(*) as total FROM shipments"
+                result = db.execute_query(query)
+                total = result[0]['total'] if result else 0
         
         return jsonify({
             'data': {'total': total},
@@ -819,7 +788,7 @@ def get_total_shipments():
 @app.route('/api/cities/top', methods=['GET'])
 def get_top_cities():
     """
-    Get top cities by shipment count - optimized for large datasets
+    Get top cities by shipment count - optimized for large datasets using indexed columns
     Query params: date_filter (month), limit (default 10)
     """
     try:
@@ -828,88 +797,51 @@ def get_top_cities():
         end_date_param = request.args.get('end_date')
         limit = int(request.args.get('limit', 10))
         
-        # Simple query first to test if data exists
-        if not date_filter or date_filter == 'total':
-            query = """
-            SELECT 
-                consignee_city as city,
-                COUNT(*) as shipment_count
-            FROM shipments 
-            WHERE consignee_city IS NOT NULL 
-            AND consignee_city != ''
-            AND consignee_city != 'NULL'
-            GROUP BY consignee_city 
-            ORDER BY shipment_count DESC 
-            LIMIT ?
-            """
-            params = [limit]
-        else:
-            start_date, end_date = parse_date_filter(date_filter)
-            if start_date and end_date:
-                # Use shipment_creation_date with proper varchar handling
-                date_sql = get_date_filter_sql()
-                query = f"""
-                SELECT 
-                    consignee_city as city,
-                    COUNT(*) as shipment_count
-                FROM shipments 
-                WHERE {date_sql} >= ? AND {date_sql} <= ?
-                AND consignee_city IS NOT NULL 
-                AND consignee_city != ''
-                AND consignee_city != 'NULL'
-                GROUP BY consignee_city 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [start_date, end_date, limit]
-            else:
-                # Fallback to simple query
-                query = """
-                SELECT 
-                    consignee_city as city,
-                    COUNT(*) as shipment_count
-                FROM shipments 
-                WHERE consignee_city IS NOT NULL 
-                AND consignee_city != ''
-                AND consignee_city != 'NULL'
-                GROUP BY consignee_city 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [limit]
-
-        # Custom range overrides preset
+        # Build efficient query using indexed columns
+        where_conditions = [
+            "consignee_city IS NOT NULL",
+            "consignee_city != ''",
+            "consignee_city != 'NULL'"
+        ]
+        params = []
+        
+        # Handle date filtering with direct varchar comparison (uses indexes)
         if start_date_param and end_date_param:
+            # Custom range takes priority
             start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
             end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
             if start_date_norm and end_date_norm:
-                date_sql = get_date_filter_sql()
-                query = f"""
-                SELECT 
-                    consignee_city as city,
-                    COUNT(*) as shipment_count
-                FROM shipments 
-                WHERE {date_sql} >= ? AND {date_sql} <= ?
-                AND consignee_city IS NOT NULL 
-                AND consignee_city != ''
-                AND consignee_city != 'NULL'
-                GROUP BY consignee_city 
-                ORDER BY shipment_count DESC 
-                LIMIT ?
-                """
-                params = [start_date_norm, end_date_norm, limit]
+                where_conditions.append("shipment_creation_date >= %s")
+                where_conditions.append("shipment_creation_date <= %s")
+                params.extend([start_date_norm, end_date_norm])
+        elif date_filter and date_filter != 'total':
+            # Use preset date filter
+            start_date, end_date = parse_date_filter(date_filter)
+            if start_date and end_date:
+                where_conditions.append("shipment_creation_date >= %s")
+                where_conditions.append("shipment_creation_date <= %s")
+                params.extend([start_date, end_date])
+        
+        # Build final query
+        where_clause = " AND ".join(where_conditions)
+        query = f"""
+        SELECT 
+            consignee_city as city,
+            COUNT(*) as shipment_count
+        FROM shipments 
+        WHERE {where_clause}
+        GROUP BY consignee_city 
+        ORDER BY shipment_count DESC 
+        LIMIT %s
+        """
+        params.append(limit)
         
         cities = db.execute_query(query, params)
         
         return jsonify({
             'data': cities,
             'date_filter': date_filter,
-            'limit': limit,
-            'debug': {
-                'query': query,
-                'params': params,
-                'result_count': len(cities)
-            }
+            'limit': limit
         })
         
     except Exception as e:
