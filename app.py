@@ -206,6 +206,27 @@ def get_weight_parsing_sql():
     END
     """
 
+def get_cod_parsing_sql():
+    """Get SQL for parsing COD values to numeric format (strip non-digits)"""
+    return """
+    CASE 
+        WHEN cod IS NULL OR cod = '' THEN NULL
+        ELSE 
+            CAST(
+                REGEXP_REPLACE(
+                    REGEXP_REPLACE(
+                        REGEXP_REPLACE(
+                            TRIM(cod), 
+                            '[^0-9.]', '', 'g'
+                        ),
+                        '^[.]', '0.', 'g'
+                    ),
+                    '[.]$', '', 'g'
+                ) AS NUMERIC
+            )
+    END
+    """
+
 def normalize_iso_to_yyyymmdd(date_str):
     """Normalize ISO date YYYY-MM-DD to YYYYMMDD for varchar date comparisons"""
     try:
@@ -1011,8 +1032,14 @@ def advanced_search():
         
         # COD filter
         if cod:
-            where_conditions.append("cod = %s")
-            params.append(cod)
+            if cod.lower() == 'yes':
+                # COD greater than 0
+                cod_sql = get_cod_parsing_sql()
+                where_conditions.append(f"{cod_sql} > 0")
+            elif cod.lower() == 'no':
+                # COD equals 0 or is null/empty
+                cod_sql = get_cod_parsing_sql()
+                where_conditions.append(f"({cod_sql} = 0 OR {cod_sql} IS NULL)")
         
         # Shipper filters
         if shipper_name:
