@@ -236,6 +236,59 @@ def normalize_iso_to_yyyymmdd(date_str):
     except Exception:
         return None
 
+def build_sql_query_from_filters(filters, columns):
+    """Build SQL query from filters and columns"""
+    try:
+        # Start with base query
+        if columns:
+            select_columns = ", ".join(columns)
+        else:
+            select_columns = "*"
+        
+        query = f"SELECT {select_columns} FROM shipments"
+        
+        # Add WHERE conditions
+        where_conditions = []
+        params = []
+        
+        # Date filter
+        if filters.get('date_filter') and filters['date_filter'] != 'total':
+            start_date, end_date = parse_date_filter(filters['date_filter'])
+            if start_date and end_date:
+                date_sql = get_date_filter_sql()
+                where_conditions.append(f"{date_sql} >= %s")
+                where_conditions.append(f"{date_sql} <= %s")
+                params.extend([start_date, end_date])
+        
+        # Other filters
+        for key, value in filters.items():
+            if key != 'date_filter' and value:
+                if key in ['shipper_name', 'consignee_name', 'shipper_city', 'consignee_city']:
+                    where_conditions.append(f"{key} LIKE %s")
+                    params.append(f'%{value}%')
+                elif key in ['min_weight', 'max_weight']:
+                    if key == 'min_weight':
+                        weight_sql = get_weight_parsing_sql()
+                        where_conditions.append(f"{weight_sql} >= %s")
+                        params.append(float(value))
+                    elif key == 'max_weight':
+                        weight_sql = get_weight_parsing_sql()
+                        where_conditions.append(f"{weight_sql} <= %s")
+                        params.append(float(value))
+        
+        # Add WHERE clause if conditions exist
+        if where_conditions:
+            query += " WHERE " + " AND ".join(where_conditions)
+        
+        # Add ORDER BY
+        query += " ORDER BY id DESC LIMIT 1000"
+        
+        return query
+        
+    except Exception as e:
+        # Fallback to simple query
+        return "SELECT * FROM shipments ORDER BY id DESC LIMIT 1000"
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -1428,24 +1481,12 @@ def download_file(filename):
 def get_custom_reports():
     """Get all custom reports"""
     try:
-        # First check if the table exists and has the is_active column
-        try:
-            query = """
-            SELECT * FROM custom_reports 
-            WHERE is_active = true
-            ORDER BY updated_at DESC, created_at DESC
-            """
-            reports = db.execute_query(query)
-        except Exception as column_error:
-            if "column \"is_active\" does not exist" in str(column_error):
-                # Fallback query without is_active filter
-                query = """
-                SELECT * FROM custom_reports 
-                ORDER BY created_at DESC
-                """
-                reports = db.execute_query(query)
-            else:
-                raise column_error
+        # Use the actual database schema
+        query = """
+        SELECT * FROM custom_reports 
+        ORDER BY created_at DESC
+        """
+        reports = db.execute_query(query)
         
         return jsonify({
             'success': True,
@@ -1459,22 +1500,11 @@ def get_custom_reports():
 def get_custom_report(report_id):
     """Get a specific custom report"""
     try:
-        # Try with is_active filter first, fallback if column doesn't exist
-        try:
-            query = """
-            SELECT * FROM custom_reports 
-            WHERE id = %s AND is_active = true
-            """
-            report = db.execute_query(query, [report_id])
-        except Exception as column_error:
-            if "column \"is_active\" does not exist" in str(column_error):
-                query = """
-                SELECT * FROM custom_reports 
-                WHERE id = %s
-                """
-                report = db.execute_query(query, [report_id])
-            else:
-                raise column_error
+        query = """
+        SELECT * FROM custom_reports 
+        WHERE id = %s
+        """
+        report = db.execute_query(query, [report_id])
         
         if not report:
             return jsonify({'error': 'Report not found'}), 404
@@ -1493,24 +1523,36 @@ def create_custom_report():
     try:
         data = request.get_json()
         
-        if not data or 'title' not in data or 'filters' not in data or 'columns' not in data:
-            return jsonify({'error': 'title, filters, and columns are required'}), 400
+        if not data or 'report_name' not in data or 'sql_query' not in data:
+            return jsonify({'error': 'report_name and sql_query are required'}), 400
+        
+        # Build SQL query from filters and columns if provided
+        sql_query = data.get('sql_query', '')
+        if not sql_query and 'filters' in data and 'columns' in data:
+            # Generate SQL query from filters and columns
+            sql_query = build_sql_query_from_filters(data['filters'], data['columns'])
         
         query = """
-        INSERT INTO custom_reports (title, description, report_type, filters, columns, chart_config, schedule_config, is_public, user_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO custom_reports (report_name, description, sql_query, parameters, user_id)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING id
         """
         
+        # Convert frontend data to parameters format
+        parameters = {
+            'filters': data.get('filters', {}),
+            'columns': data.get('columns', []),
+            'report_type': data.get('report_type', 'custom'),
+            'chart_config': data.get('chart_config', {}),
+            'schedule_config': data.get('schedule_config', {}),
+            'is_public': data.get('is_public', False)
+        }
+        
         result = db.execute_insert(query, [
-            data['title'],
+            data['report_name'],
             data.get('description', ''),
-            data.get('report_type', 'custom'),
-            json.dumps(data['filters']),
-            json.dumps(data['columns']),
-            json.dumps(data.get('chart_config', {})),
-            json.dumps(data.get('schedule_config', {})),
-            data.get('is_public', False),
+            sql_query,
+            json.dumps(parameters),
             'default_user'
         ])
         
@@ -1529,25 +1571,35 @@ def update_custom_report(report_id):
     try:
         data = request.get_json()
         
-        if not data or 'title' not in data or 'filters' not in data or 'columns' not in data:
-            return jsonify({'error': 'title, filters, and columns are required'}), 400
+        if not data or 'report_name' not in data:
+            return jsonify({'error': 'report_name is required'}), 400
+        
+        # Build SQL query from filters and columns if provided
+        sql_query = data.get('sql_query', '')
+        if not sql_query and 'filters' in data and 'columns' in data:
+            sql_query = build_sql_query_from_filters(data['filters'], data['columns'])
+        
+        # Convert frontend data to parameters format
+        parameters = {
+            'filters': data.get('filters', {}),
+            'columns': data.get('columns', []),
+            'report_type': data.get('report_type', 'custom'),
+            'chart_config': data.get('chart_config', {}),
+            'schedule_config': data.get('schedule_config', {}),
+            'is_public': data.get('is_public', False)
+        }
         
         query = """
         UPDATE custom_reports 
-        SET title = %s, description = %s, report_type = %s, filters = %s, columns = %s, 
-            chart_config = %s, schedule_config = %s, is_public = %s, updated_at = CURRENT_TIMESTAMP
+        SET report_name = %s, description = %s, sql_query = %s, parameters = %s
         WHERE id = %s
         """
         
         db.execute_insert(query, [
-            data['title'],
+            data['report_name'],
             data.get('description', ''),
-            data.get('report_type', 'custom'),
-            json.dumps(data['filters']),
-            json.dumps(data['columns']),
-            json.dumps(data.get('chart_config', {})),
-            json.dumps(data.get('schedule_config', {})),
-            data.get('is_public', False),
+            sql_query,
+            json.dumps(parameters),
             report_id
         ])
         
@@ -1561,9 +1613,9 @@ def update_custom_report(report_id):
 
 @app.route('/api/custom-reports/<int:report_id>', methods=['DELETE'])
 def delete_custom_report(report_id):
-    """Delete a custom report (soft delete)"""
+    """Delete a custom report"""
     try:
-        query = "UPDATE custom_reports SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        query = "DELETE FROM custom_reports WHERE id = %s"
         db.execute_insert(query, [report_id])
         
         return jsonify({
@@ -1579,76 +1631,33 @@ def run_custom_report(report_id):
     """Run a custom report and return data"""
     try:
         # Get report configuration
-        try:
-            query = """
-            SELECT * FROM custom_reports 
-            WHERE id = %s AND is_active = true
-            """
-            report = db.execute_query(query, [report_id])
-        except Exception as column_error:
-            if "column \"is_active\" does not exist" in str(column_error):
-                query = """
-                SELECT * FROM custom_reports 
-                WHERE id = %s
-                """
-                report = db.execute_query(query, [report_id])
-            else:
-                raise column_error
+        query = """
+        SELECT * FROM custom_reports 
+        WHERE id = %s
+        """
+        report = db.execute_query(query, [report_id])
         
         if not report:
             return jsonify({'error': 'Report not found'}), 404
         
         report_config = report[0]
-        filters = report_config['filters']
-        columns = report_config['columns']
+        sql_query = report_config['sql_query']
+        parameters = report_config.get('parameters', {})
         
-        # Build query based on report configuration
-        where_conditions = []
-        params = []
-        
-        # Apply filters
-        if filters.get('date_filter') and filters['date_filter'] != 'total':
-            start_date, end_date = parse_date_filter(filters['date_filter'])
-            if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                where_conditions.append(f"{date_sql} >= %s")
-                where_conditions.append(f"{date_sql} <= %s")
-                params.extend([start_date, end_date])
-        
-        # Add other filters
-        for key, value in filters.items():
-            if key != 'date_filter' and value:
-                if key in ['shipper_name', 'consignee_name', 'shipper_city', 'consignee_city']:
-                    where_conditions.append(f"{key} LIKE %s")
-                    params.append(f'%{value}%')
-                elif key in ['min_weight', 'max_weight']:
-                    if key == 'min_weight':
-                        weight_sql = get_weight_parsing_sql()
-                        where_conditions.append(f"{weight_sql} >= %s")
-                        params.append(float(value))
-                    elif key == 'max_weight':
-                        weight_sql = get_weight_parsing_sql()
-                        where_conditions.append(f"{weight_sql} <= %s")
-                        params.append(float(value))
-        
-        # Build final query
-        where_clause = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
-        
-        # Select columns
-        if columns:
-            select_columns = ", ".join(columns)
+        # Execute the stored SQL query
+        if sql_query:
+            data = db.execute_query(sql_query)
         else:
-            select_columns = "*"
+            # Fallback: build query from parameters
+            filters = parameters.get('filters', {})
+            columns = parameters.get('columns', [])
+            sql_query = build_sql_query_from_filters(filters, columns)
+            data = db.execute_query(sql_query)
         
-        query = f"SELECT {select_columns} FROM shipments{where_clause} ORDER BY id DESC LIMIT 1000"
-        
-        # Execute query
-        data = db.execute_query(query, params)
-        
-        # Update run count and last run time
+        # Update execution count and last executed time
         update_query = """
         UPDATE custom_reports 
-        SET run_count = run_count + 1, last_run_at = CURRENT_TIMESTAMP
+        SET execution_count = execution_count + 1, last_executed = CURRENT_TIMESTAMP
         WHERE id = %s
         """
         db.execute_insert(update_query, [report_id])
@@ -1658,10 +1667,9 @@ def run_custom_report(report_id):
             'data': data,
             'count': len(data),
             'report_config': {
-                'title': report_config['title'],
+                'report_name': report_config['report_name'],
                 'description': report_config['description'],
-                'filters': filters,
-                'columns': columns
+                'parameters': parameters
             }
         })
         
@@ -1674,39 +1682,51 @@ def get_report_templates():
     templates = [
         {
             'id': 'shipments_summary',
-            'title': 'Shipments Summary Report',
+            'report_name': 'Shipments Summary Report',
             'description': 'Overview of all shipments with key metrics',
-            'report_type': 'summary',
-            'filters': {'date_filter': 'month'},
-            'columns': ['id', 'number_shipment', 'shipper_name', 'consignee_name', 'shipment_creation_date', 'shipment_weight', 'cod'],
-            'chart_config': {'type': 'bar', 'x_axis': 'shipment_creation_date', 'y_axis': 'count'}
+            'sql_query': "SELECT id, number_shipment, shipper_name, consignee_name, shipment_creation_date, shipment_weight, cod FROM shipments ORDER BY id DESC LIMIT 1000",
+            'parameters': {
+                'report_type': 'summary',
+                'filters': {'date_filter': 'month'},
+                'columns': ['id', 'number_shipment', 'shipper_name', 'consignee_name', 'shipment_creation_date', 'shipment_weight', 'cod'],
+                'chart_config': {'type': 'bar', 'x_axis': 'shipment_creation_date', 'y_axis': 'count'}
+            }
         },
         {
             'id': 'top_customers',
-            'title': 'Top Customers Report',
+            'report_name': 'Top Customers Report',
             'description': 'List of top customers by shipment volume',
-            'report_type': 'analytics',
-            'filters': {'date_filter': 'month'},
-            'columns': ['shipper_name', 'shipper_phone', 'count'],
-            'chart_config': {'type': 'pie', 'x_axis': 'shipper_name', 'y_axis': 'count'}
+            'sql_query': "SELECT shipper_name, shipper_phone, COUNT(*) as shipment_count FROM shipments WHERE shipper_name IS NOT NULL GROUP BY shipper_name, shipper_phone ORDER BY shipment_count DESC LIMIT 100",
+            'parameters': {
+                'report_type': 'analytics',
+                'filters': {'date_filter': 'month'},
+                'columns': ['shipper_name', 'shipper_phone', 'shipment_count'],
+                'chart_config': {'type': 'pie', 'x_axis': 'shipper_name', 'y_axis': 'shipment_count'}
+            }
         },
         {
             'id': 'city_analysis',
-            'title': 'City Analysis Report',
+            'report_name': 'City Analysis Report',
             'description': 'Shipment distribution by cities',
-            'report_type': 'analytics',
-            'filters': {'date_filter': 'month'},
-            'columns': ['consignee_city', 'count'],
-            'chart_config': {'type': 'bar', 'x_axis': 'consignee_city', 'y_axis': 'count'}
+            'sql_query': "SELECT consignee_city, COUNT(*) as shipment_count FROM shipments WHERE consignee_city IS NOT NULL AND consignee_city != '' GROUP BY consignee_city ORDER BY shipment_count DESC LIMIT 100",
+            'parameters': {
+                'report_type': 'analytics',
+                'filters': {'date_filter': 'month'},
+                'columns': ['consignee_city', 'shipment_count'],
+                'chart_config': {'type': 'bar', 'x_axis': 'consignee_city', 'y_axis': 'shipment_count'}
+            }
         },
         {
             'id': 'weight_analysis',
-            'title': 'Weight Analysis Report',
+            'report_name': 'Weight Analysis Report',
             'description': 'Analysis of shipment weights and averages',
-            'report_type': 'analytics',
-            'filters': {'date_filter': 'month'},
-            'columns': ['shipment_weight', 'cod'],
-            'chart_config': {'type': 'line', 'x_axis': 'shipment_creation_date', 'y_axis': 'shipment_weight'}
+            'sql_query': "SELECT shipment_weight, cod, shipment_creation_date FROM shipments WHERE shipment_weight IS NOT NULL AND shipment_weight != '' ORDER BY id DESC LIMIT 1000",
+            'parameters': {
+                'report_type': 'analytics',
+                'filters': {'date_filter': 'month'},
+                'columns': ['shipment_weight', 'cod', 'shipment_creation_date'],
+                'chart_config': {'type': 'line', 'x_axis': 'shipment_creation_date', 'y_axis': 'shipment_weight'}
+            }
         }
     ]
     
