@@ -757,30 +757,35 @@ def get_total_shipments():
             result = db.execute_query(query)
             total = result[0]['total_count'] if result else 0
         else:
-            # Default behavior: use month filter or provided filter
-            start_date, end_date = parse_date_filter(date_filter)
-            params = []
-            if start_date and end_date:
-                date_sql = get_date_filter_sql()
-                query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= ? AND {date_sql} <= ?"
-                params = [start_date, end_date]
-                result = db.execute_query(query, params)
-                total = result[0]['total'] if result else 0
-            # Custom range overrides
+            # Handle custom date range first (highest priority)
             if start_date_param and end_date_param:
                 start_date_norm = normalize_iso_to_yyyymmdd(start_date_param)
                 end_date_norm = normalize_iso_to_yyyymmdd(end_date_param)
                 if start_date_norm and end_date_norm:
                     date_sql = get_date_filter_sql()
-                    query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= ? AND {date_sql} <= ?"
+                    query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= %s AND {date_sql} <= %s"
                     params = [start_date_norm, end_date_norm]
                     result = db.execute_query(query, params)
                     total = result[0]['total'] if result else 0
+                else:
+                    # Fallback to total count if custom range parsing fails
+                    query = "SELECT COUNT(*) as total FROM shipments"
+                    result = db.execute_query(query)
+                    total = result[0]['total'] if result else 0
             else:
-                # Fallback to total count if date parsing fails
-                query = "SELECT COUNT(*) as total FROM shipments"
-                result = db.execute_query(query)
-                total = result[0]['total'] if result else 0
+                # Use preset date filter (today, week, month, year)
+                start_date, end_date = parse_date_filter(date_filter)
+                if start_date and end_date:
+                    date_sql = get_date_filter_sql()
+                    query = f"SELECT COUNT(*) as total FROM shipments WHERE {date_sql} >= %s AND {date_sql} <= %s"
+                    params = [start_date, end_date]
+                    result = db.execute_query(query, params)
+                    total = result[0]['total'] if result else 0
+                else:
+                    # Fallback to total count if date parsing fails
+                    query = "SELECT COUNT(*) as total FROM shipments"
+                    result = db.execute_query(query)
+                    total = result[0]['total'] if result else 0
         
         return jsonify({
             'data': {'total': total},
