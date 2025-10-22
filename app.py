@@ -1423,6 +1423,393 @@ def download_file(filename):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Custom Reports API Endpoints
+@app.route('/api/custom-reports', methods=['GET'])
+def get_custom_reports():
+    """Get all custom reports"""
+    try:
+        query = """
+        SELECT * FROM custom_reports 
+        WHERE is_active = true
+        ORDER BY updated_at DESC, created_at DESC
+        """
+        reports = db.execute_query(query)
+        
+        return jsonify({
+            'success': True,
+            'data': reports
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/custom-reports/<int:report_id>', methods=['GET'])
+def get_custom_report(report_id):
+    """Get a specific custom report"""
+    try:
+        query = """
+        SELECT * FROM custom_reports 
+        WHERE id = %s AND is_active = true
+        """
+        report = db.execute_query(query, [report_id])
+        
+        if not report:
+            return jsonify({'error': 'Report not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': report[0]
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/custom-reports', methods=['POST'])
+def create_custom_report():
+    """Create a new custom report"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'title' not in data or 'filters' not in data or 'columns' not in data:
+            return jsonify({'error': 'title, filters, and columns are required'}), 400
+        
+        query = """
+        INSERT INTO custom_reports (title, description, report_type, filters, columns, chart_config, schedule_config, is_public, user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """
+        
+        result = db.execute_insert(query, [
+            data['title'],
+            data.get('description', ''),
+            data.get('report_type', 'custom'),
+            json.dumps(data['filters']),
+            json.dumps(data['columns']),
+            json.dumps(data.get('chart_config', {})),
+            json.dumps(data.get('schedule_config', {})),
+            data.get('is_public', False),
+            'default_user'
+        ])
+        
+        return jsonify({
+            'success': True,
+            'id': result,
+            'message': 'Report created successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/custom-reports/<int:report_id>', methods=['PUT'])
+def update_custom_report(report_id):
+    """Update a custom report"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'title' not in data or 'filters' not in data or 'columns' not in data:
+            return jsonify({'error': 'title, filters, and columns are required'}), 400
+        
+        query = """
+        UPDATE custom_reports 
+        SET title = %s, description = %s, report_type = %s, filters = %s, columns = %s, 
+            chart_config = %s, schedule_config = %s, is_public = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        
+        db.execute_insert(query, [
+            data['title'],
+            data.get('description', ''),
+            data.get('report_type', 'custom'),
+            json.dumps(data['filters']),
+            json.dumps(data['columns']),
+            json.dumps(data.get('chart_config', {})),
+            json.dumps(data.get('schedule_config', {})),
+            data.get('is_public', False),
+            report_id
+        ])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Report updated successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/custom-reports/<int:report_id>', methods=['DELETE'])
+def delete_custom_report(report_id):
+    """Delete a custom report (soft delete)"""
+    try:
+        query = "UPDATE custom_reports SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        db.execute_insert(query, [report_id])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Report deleted successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/custom-reports/<int:report_id>/run', methods=['POST'])
+def run_custom_report(report_id):
+    """Run a custom report and return data"""
+    try:
+        # Get report configuration
+        query = """
+        SELECT * FROM custom_reports 
+        WHERE id = %s AND is_active = true
+        """
+        report = db.execute_query(query, [report_id])
+        
+        if not report:
+            return jsonify({'error': 'Report not found'}), 404
+        
+        report_config = report[0]
+        filters = report_config['filters']
+        columns = report_config['columns']
+        
+        # Build query based on report configuration
+        where_conditions = []
+        params = []
+        
+        # Apply filters
+        if filters.get('date_filter') and filters['date_filter'] != 'total':
+            start_date, end_date = parse_date_filter(filters['date_filter'])
+            if start_date and end_date:
+                date_sql = get_date_filter_sql()
+                where_conditions.append(f"{date_sql} >= %s")
+                where_conditions.append(f"{date_sql} <= %s")
+                params.extend([start_date, end_date])
+        
+        # Add other filters
+        for key, value in filters.items():
+            if key != 'date_filter' and value:
+                if key in ['shipper_name', 'consignee_name', 'shipper_city', 'consignee_city']:
+                    where_conditions.append(f"{key} LIKE %s")
+                    params.append(f'%{value}%')
+                elif key in ['min_weight', 'max_weight']:
+                    if key == 'min_weight':
+                        weight_sql = get_weight_parsing_sql()
+                        where_conditions.append(f"{weight_sql} >= %s")
+                        params.append(float(value))
+                    elif key == 'max_weight':
+                        weight_sql = get_weight_parsing_sql()
+                        where_conditions.append(f"{weight_sql} <= %s")
+                        params.append(float(value))
+        
+        # Build final query
+        where_clause = " WHERE " + " AND ".join(where_conditions) if where_conditions else ""
+        
+        # Select columns
+        if columns:
+            select_columns = ", ".join(columns)
+        else:
+            select_columns = "*"
+        
+        query = f"SELECT {select_columns} FROM shipments{where_clause} ORDER BY id DESC LIMIT 1000"
+        
+        # Execute query
+        data = db.execute_query(query, params)
+        
+        # Update run count and last run time
+        update_query = """
+        UPDATE custom_reports 
+        SET run_count = run_count + 1, last_run_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        db.execute_insert(update_query, [report_id])
+        
+        return jsonify({
+            'success': True,
+            'data': data,
+            'count': len(data),
+            'report_config': {
+                'title': report_config['title'],
+                'description': report_config['description'],
+                'filters': filters,
+                'columns': columns
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/custom-reports/templates', methods=['GET'])
+def get_report_templates():
+    """Get predefined report templates"""
+    templates = [
+        {
+            'id': 'shipments_summary',
+            'title': 'Shipments Summary Report',
+            'description': 'Overview of all shipments with key metrics',
+            'report_type': 'summary',
+            'filters': {'date_filter': 'month'},
+            'columns': ['id', 'number_shipment', 'shipper_name', 'consignee_name', 'shipment_creation_date', 'shipment_weight', 'cod'],
+            'chart_config': {'type': 'bar', 'x_axis': 'shipment_creation_date', 'y_axis': 'count'}
+        },
+        {
+            'id': 'top_customers',
+            'title': 'Top Customers Report',
+            'description': 'List of top customers by shipment volume',
+            'report_type': 'analytics',
+            'filters': {'date_filter': 'month'},
+            'columns': ['shipper_name', 'shipper_phone', 'count'],
+            'chart_config': {'type': 'pie', 'x_axis': 'shipper_name', 'y_axis': 'count'}
+        },
+        {
+            'id': 'city_analysis',
+            'title': 'City Analysis Report',
+            'description': 'Shipment distribution by cities',
+            'report_type': 'analytics',
+            'filters': {'date_filter': 'month'},
+            'columns': ['consignee_city', 'count'],
+            'chart_config': {'type': 'bar', 'x_axis': 'consignee_city', 'y_axis': 'count'}
+        },
+        {
+            'id': 'weight_analysis',
+            'title': 'Weight Analysis Report',
+            'description': 'Analysis of shipment weights and averages',
+            'report_type': 'analytics',
+            'filters': {'date_filter': 'month'},
+            'columns': ['shipment_weight', 'cod'],
+            'chart_config': {'type': 'line', 'x_axis': 'shipment_creation_date', 'y_axis': 'shipment_weight'}
+        }
+    ]
+    
+    return jsonify({
+        'success': True,
+        'data': templates
+    })
+
+# Scheduled Reports API Endpoints
+@app.route('/api/scheduled-reports', methods=['GET'])
+def get_scheduled_reports():
+    """Get all scheduled reports"""
+    try:
+        query = """
+        SELECT sr.*, cr.title as report_title, cr.description as report_description
+        FROM scheduled_reports sr
+        JOIN custom_reports cr ON sr.report_id = cr.id
+        WHERE sr.is_active = true
+        ORDER BY sr.next_run_at ASC, sr.created_at DESC
+        """
+        reports = db.execute_query(query)
+        
+        return jsonify({
+            'success': True,
+            'data': reports
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/scheduled-reports', methods=['POST'])
+def create_scheduled_report():
+    """Create a new scheduled report"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'report_id' not in data or 'schedule_name' not in data:
+            return jsonify({'error': 'report_id and schedule_name are required'}), 400
+        
+        query = """
+        INSERT INTO scheduled_reports (report_id, schedule_name, schedule_type, schedule_time, 
+                                     schedule_days, email_recipients, email_subject, email_body, user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """
+        
+        result = db.execute_insert(query, [
+            data['report_id'],
+            data['schedule_name'],
+            data.get('schedule_type', 'daily'),
+            data.get('schedule_time', '09:00:00'),
+            json.dumps(data.get('schedule_days', [])),
+            json.dumps(data.get('email_recipients', [])),
+            data.get('email_subject', ''),
+            data.get('email_body', ''),
+            'default_user'
+        ])
+        
+        return jsonify({
+            'success': True,
+            'id': result,
+            'message': 'Scheduled report created successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/scheduled-reports/<int:schedule_id>', methods=['PUT'])
+def update_scheduled_report(schedule_id):
+    """Update a scheduled report"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'schedule_name' not in data:
+            return jsonify({'error': 'schedule_name is required'}), 400
+        
+        query = """
+        UPDATE scheduled_reports 
+        SET schedule_name = %s, schedule_type = %s, schedule_time = %s, 
+            schedule_days = %s, email_recipients = %s, email_subject = %s, 
+            email_body = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        
+        db.execute_insert(query, [
+            data['schedule_name'],
+            data.get('schedule_type', 'daily'),
+            data.get('schedule_time', '09:00:00'),
+            json.dumps(data.get('schedule_days', [])),
+            json.dumps(data.get('email_recipients', [])),
+            data.get('email_subject', ''),
+            data.get('email_body', ''),
+            schedule_id
+        ])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Scheduled report updated successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/scheduled-reports/<int:schedule_id>', methods=['DELETE'])
+def delete_scheduled_report(schedule_id):
+    """Delete a scheduled report"""
+    try:
+        query = "UPDATE scheduled_reports SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        db.execute_insert(query, [schedule_id])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Scheduled report deleted successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/scheduled-reports/<int:schedule_id>/toggle', methods=['PUT'])
+def toggle_scheduled_report(schedule_id):
+    """Toggle scheduled report active status"""
+    try:
+        data = request.get_json()
+        is_active = data.get('is_active', True)
+        
+        query = "UPDATE scheduled_reports SET is_active = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+        db.execute_insert(query, [is_active, schedule_id])
+        
+        return jsonify({
+            'success': True,
+            'message': f'Scheduled report {"activated" if is_active else "deactivated"} successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # Saved Searches API Endpoints
 @app.route('/api/saved-searches', methods=['GET'])
 def get_saved_searches():
