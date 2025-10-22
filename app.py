@@ -735,14 +735,10 @@ def get_total_shipments():
         end_date_param = request.args.get('end_date')
         
         if date_filter == 'total':
-            # For total count, use a fast approximation for large datasets
-            query = """
-            SELECT 
-                (SELECT COUNT(*) FROM shipments WHERE id > (SELECT MAX(id) - 100000 FROM shipments)) as recent_count,
-                (SELECT COUNT(*) FROM shipments) as total_count
-            """
+            # For total count, use a simple and fast query
+            query = "SELECT COUNT(*) as total FROM shipments"
             result = db.execute_query(query)
-            total = result[0]['total_count'] if result else 0
+            total = result[0]['total'] if result else 0
         else:
             # Build efficient query using indexed columns
             where_conditions = []
