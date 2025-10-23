@@ -136,20 +136,15 @@ def create_custom_reports_table(cursor):
         cursor.execute("""
             CREATE TABLE custom_reports (
                 id SERIAL PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
+                report_name VARCHAR(255) NOT NULL,
                 description TEXT,
-                report_type VARCHAR(50) NOT NULL DEFAULT 'custom',
-                filters JSONB NOT NULL,
-                columns JSONB NOT NULL,
-                chart_config JSONB,
-                schedule_config JSONB,
-                is_public BOOLEAN DEFAULT FALSE,
-                is_active BOOLEAN DEFAULT TRUE,
+                sql_query TEXT NOT NULL,
+                parameters JSONB DEFAULT '{}',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_run_at TIMESTAMP,
-                run_count INTEGER DEFAULT 0,
-                user_id VARCHAR(100) DEFAULT 'default_user'
+                last_executed TIMESTAMP,
+                execution_count INTEGER DEFAULT 0,
+                user_id VARCHAR(100) DEFAULT 'default_user',
+                CONSTRAINT unique_report_name UNIQUE(report_name, user_id)
             )
         """)
         

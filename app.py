@@ -236,6 +236,36 @@ def normalize_iso_to_yyyymmdd(date_str):
     except Exception:
         return None
 
+def process_arabic_text(text):
+    """Process Arabic text for better display in PDF"""
+    try:
+        if not text or not isinstance(text, str):
+            return str(text) if text else ''
+        
+        # Clean and normalize the text
+        text = str(text).strip()
+        
+        # Handle common Arabic text issues
+        # Replace problematic characters that might cause display issues
+        text = text.replace('\u200f', '')  # Right-to-left mark
+        text = text.replace('\u200e', '')  # Left-to-right mark
+        text = text.replace('\u202a', '')  # Left-to-right embedding
+        text = text.replace('\u202b', '')  # Right-to-left embedding
+        text = text.replace('\u202c', '')  # Pop directional formatting
+        text = text.replace('\u202d', '')  # Left-to-right override
+        text = text.replace('\u202e', '')  # Right-to-left override
+        
+        # Ensure proper UTF-8 encoding
+        try:
+            text = text.encode('utf-8').decode('utf-8')
+        except:
+            pass
+            
+        return text
+    except Exception:
+        # If processing fails, return original text
+        return str(text) if text else ''
+
 def build_sql_query_from_filters(filters, columns):
     """Build SQL query from filters and columns"""
     try:
@@ -263,7 +293,7 @@ def build_sql_query_from_filters(filters, columns):
         # Other filters
         for key, value in filters.items():
             if key != 'date_filter' and value:
-                if key in ['shipper_name', 'consignee_name', 'shipper_city', 'consignee_city']:
+                if key in ['shipper_name', 'shipper_city', 'consignee_name', 'consignee_city']:
                     where_conditions.append(f"{key} LIKE %s")
                     params.append(f'%{value}%')
                 elif key in ['min_weight', 'max_weight']:
@@ -1428,22 +1458,60 @@ def export_data():
                 # Get column names
                 columns = list(export_data[0].keys())
                 
-                # Prepare table data
+                # Prepare table data with proper Arabic text processing
                 table_data = [columns]  # Header
                 for row in export_data:
-                    table_data.append([str(row.get(col, '')) for col in columns])
+                    row_data = []
+                    for col in columns:
+                        value = row.get(col, '')
+                        # Process Arabic text for proper display
+                        processed_value = process_arabic_text(value)
+                        row_data.append(processed_value)
+                    table_data.append(row_data)
                 
-                # Create table
-                table = Table(table_data)
+                # Create table with better Arabic text support
+                # Convert text data to Paragraph objects for better text handling
+                processed_table_data = []
+                for row_idx, row in enumerate(table_data):
+                    processed_row = []
+                    for cell in row:
+                        if isinstance(cell, str) and cell.strip():
+                            # Use Paragraph for better text rendering
+                            try:
+                                # Create a simple paragraph style
+                                from reportlab.lib.styles import ParagraphStyle
+                                style = ParagraphStyle(
+                                    'CustomStyle',
+                                    fontName='Helvetica',
+                                    fontSize=8 if row_idx > 0 else 10,
+                                    alignment=1,  # Center alignment
+                                    spaceAfter=6,
+                                    spaceBefore=6
+                                )
+                                processed_cell = Paragraph(process_arabic_text(cell), style)
+                            except:
+                                processed_cell = process_arabic_text(cell)
+                        else:
+                            processed_cell = process_arabic_text(cell) if cell else ''
+                        processed_row.append(processed_cell)
+                    processed_table_data.append(processed_row)
+                
+                table = Table(processed_table_data)
                 table.setStyle(TableStyle([
                     ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                     ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                     ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, 0), 14),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8),
                     ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
                     ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                    ('TOPPADDING', (0, 0), (-1, -1), 6),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 6)
                 ]))
                 
                 story.append(table)
@@ -1523,8 +1591,8 @@ def create_custom_report():
     try:
         data = request.get_json()
         
-        if not data or 'report_name' not in data or 'sql_query' not in data:
-            return jsonify({'error': 'report_name and sql_query are required'}), 400
+        if not data or 'report_name' not in data:
+            return jsonify({'error': 'report_name is required'}), 400
         
         # Build SQL query from filters and columns if provided
         sql_query = data.get('sql_query', '')
@@ -1684,11 +1752,11 @@ def get_report_templates():
             'id': 'shipments_summary',
             'report_name': 'Shipments Summary Report',
             'description': 'Overview of all shipments with key metrics',
-            'sql_query': "SELECT id, number_shipment, shipper_name, consignee_name, shipment_creation_date, shipment_weight, cod FROM shipments ORDER BY id DESC LIMIT 1000",
+            'sql_query': "SELECT id, number_shipment, shipper_name, consignee_name, shipment_creation_date, shipment_weight, cod_cash_on_delivery FROM shipments ORDER BY id DESC LIMIT 1000",
             'parameters': {
                 'report_type': 'summary',
                 'filters': {'date_filter': 'month'},
-                'columns': ['id', 'number_shipment', 'shipper_name', 'consignee_name', 'shipment_creation_date', 'shipment_weight', 'cod'],
+                'columns': ['id', 'number_shipment', 'shipper_name', 'consignee_name', 'shipment_creation_date', 'shipment_weight', 'cod_cash_on_delivery'],
                 'chart_config': {'type': 'bar', 'x_axis': 'shipment_creation_date', 'y_axis': 'count'}
             }
         },
@@ -1696,11 +1764,11 @@ def get_report_templates():
             'id': 'top_customers',
             'report_name': 'Top Customers Report',
             'description': 'List of top customers by shipment volume',
-            'sql_query': "SELECT shipper_name, shipper_phone, COUNT(*) as shipment_count FROM shipments WHERE shipper_name IS NOT NULL GROUP BY shipper_name, shipper_phone ORDER BY shipment_count DESC LIMIT 100",
+            'sql_query': "SELECT shipper_name, shipper_phone_number, COUNT(*) as shipment_count FROM shipments WHERE shipper_name IS NOT NULL GROUP BY shipper_name, shipper_phone_number ORDER BY shipment_count DESC LIMIT 100",
             'parameters': {
                 'report_type': 'analytics',
                 'filters': {'date_filter': 'month'},
-                'columns': ['shipper_name', 'shipper_phone', 'shipment_count'],
+                'columns': ['shipper_name', 'shipper_phone_number', 'shipment_count'],
                 'chart_config': {'type': 'pie', 'x_axis': 'shipper_name', 'y_axis': 'shipment_count'}
             }
         },
@@ -1720,11 +1788,11 @@ def get_report_templates():
             'id': 'weight_analysis',
             'report_name': 'Weight Analysis Report',
             'description': 'Analysis of shipment weights and averages',
-            'sql_query': "SELECT shipment_weight, cod, shipment_creation_date FROM shipments WHERE shipment_weight IS NOT NULL AND shipment_weight != '' ORDER BY id DESC LIMIT 1000",
+            'sql_query': "SELECT shipment_weight, cod_cash_on_delivery, shipment_creation_date FROM shipments WHERE shipment_weight IS NOT NULL AND shipment_weight != '' ORDER BY id DESC LIMIT 1000",
             'parameters': {
                 'report_type': 'analytics',
                 'filters': {'date_filter': 'month'},
-                'columns': ['shipment_weight', 'cod', 'shipment_creation_date'],
+                'columns': ['shipment_weight', 'cod_cash_on_delivery', 'shipment_creation_date'],
                 'chart_config': {'type': 'line', 'x_axis': 'shipment_creation_date', 'y_axis': 'shipment_weight'}
             }
         }
