@@ -1749,51 +1749,349 @@ def get_report_templates():
     """Get predefined report templates"""
     templates = [
         {
-            'id': 'shipments_summary',
-            'report_name': 'Shipments Summary Report',
-            'description': 'Overview of all shipments with key metrics',
-            'sql_query': "SELECT id, number_shipment, shipper_name, consignee_name, shipment_creation_date, shipment_weight, cod_cash_on_delivery FROM shipments ORDER BY id DESC LIMIT 1000",
+            'id': 'monthly_shipments_by_phone',
+            'report_name': 'Monthly Shipments by Phone Number',
+            'description': 'Track shipments per month for a specific shipper',
+            'sql_query': """SELECT
+    CASE SUBSTRING(shipment_creation_date
+         FROM '\\d{2}-([A-Za-z]{3})-\\d{2}')
+        WHEN 'Jan' THEN '01' WHEN 'Feb' THEN '02'
+        WHEN 'Mar' THEN '03' WHEN 'Apr' THEN '04'
+        WHEN 'May' THEN '05' WHEN 'Jun' THEN '06'
+        WHEN 'Jul' THEN '07' WHEN 'Aug' THEN '08'
+        WHEN 'Sep' THEN '09' WHEN 'Oct' THEN '10'
+        WHEN 'Nov' THEN '11' WHEN 'Dec' THEN '12'
+    END || '-20' || SUBSTRING(shipment_creation_date
+    FROM '\\d{2}-[A-Za-z]{3}-(\\d{2})') AS "Month",
+    COUNT(*) AS "Total Shipments"
+FROM shipments
+WHERE shipper_phone LIKE '%{phone_number}%'
+GROUP BY
+    SUBSTRING(shipment_creation_date
+    FROM '\\d{2}-[A-Za-z]{3}-(\\d{2})'),
+    SUBSTRING(shipment_creation_date
+    FROM '\\d{2}-([A-Za-z]{3})-\\d{2}')
+ORDER BY 1 DESC""",
+            'parameters': {
+                'report_type': 'analytics',
+                'required_params': {'phone_number': '9516163600'},
+                'columns': ['Month', 'Total Shipments'],
+                'chart_config': {'type': 'line', 'x_axis': 'Month', 'y_axis': 'Total Shipments'}
+            }
+        },
+        {
+            'id': 'shipments_by_sal_pattern',
+            'report_name': 'Shipments by Reference Number Pattern (SAL)',
+            'description': 'Monthly analysis of SAL pattern shipments',
+            'sql_query': """SELECT
+    CASE SUBSTRING(shipment_creation_date
+         FROM '\\d{2}-([A-Za-z]{3})-\\d{2}')
+        WHEN 'Jan' THEN '01' WHEN 'Feb' THEN '02'
+        WHEN 'Mar' THEN '03' WHEN 'Apr' THEN '04'
+        WHEN 'May' THEN '05' WHEN 'Jun' THEN '06'
+        WHEN 'Jul' THEN '07' WHEN 'Aug' THEN '08'
+        WHEN 'Sep' THEN '09' WHEN 'Oct' THEN '10'
+        WHEN 'Nov' THEN '11' WHEN 'Dec' THEN '12'
+    END || '-20' || SUBSTRING(shipment_creation_date
+    FROM '\\d{2}-[A-Za-z]{3}-(\\d{2})') AS "Month",
+    COUNT(*) AS "SAL Shipments"
+FROM shipments
+WHERE shipment_reference_number ~ '^SAL[0-9]+$'
+GROUP BY
+    SUBSTRING(shipment_creation_date
+    FROM '\\d{2}-[A-Za-z]{3}-(\\d{2})'),
+    SUBSTRING(shipment_creation_date
+    FROM '\\d{2}-([A-Za-z]{3})-\\d{2}')
+ORDER BY 1 DESC""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Month', 'SAL Shipments'],
+                'chart_config': {'type': 'bar', 'x_axis': 'Month', 'y_axis': 'SAL Shipments'}
+            }
+        },
+        {
+            'id': 'top_20_destination_cities',
+            'report_name': 'Top 20 Destination Cities',
+            'description': 'Most popular destination cities with shipment counts and percentages',
+            'sql_query': """SELECT
+    consignee_city AS "City",
+    COUNT(*) AS "Total Shipments",
+    ROUND(COUNT(*) * 100.0 /
+          (SELECT COUNT(*) FROM shipments), 2)
+          AS "Percentage"
+FROM shipments
+WHERE consignee_city IS NOT NULL
+GROUP BY consignee_city
+ORDER BY COUNT(*) DESC
+LIMIT 20""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['City', 'Total Shipments', 'Percentage'],
+                'chart_config': {'type': 'pie', 'x_axis': 'City', 'y_axis': 'Total Shipments'}
+            }
+        },
+        {
+            'id': 'top_15_active_shippers',
+            'report_name': 'Top 15 Active Shippers (Last 30 Days)',
+            'description': 'Most active shippers in the last 30 days',
+            'sql_query': """SELECT
+    shipper_phone AS "Phone",
+    shipper_name AS "Name",
+    COUNT(*) AS "Recent Shipments"
+FROM shipments
+WHERE shipment_creation_date >= '01-Oct-25'
+GROUP BY shipper_phone, shipper_name
+ORDER BY COUNT(*) DESC
+LIMIT 15""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Phone', 'Name', 'Recent Shipments'],
+                'chart_config': {'type': 'bar', 'x_axis': 'Name', 'y_axis': 'Recent Shipments'}
+            }
+        },
+        {
+            'id': 'shipment_distribution_by_weight',
+            'report_name': 'Shipment Distribution by Weight Range',
+            'description': 'Analysis of shipments grouped by weight ranges',
+            'sql_query': """SELECT
+    CASE
+        WHEN shipment_weight LIKE '0.10 Kg' THEN '0-0.10 Kg'
+        WHEN shipment_weight LIKE '0.20 Kg' OR
+             shipment_weight LIKE '0.30 Kg' OR
+             shipment_weight LIKE '0.50 Kg'
+             THEN '0.11-0.50 Kg'
+        WHEN shipment_weight LIKE '1.00 Kg' OR
+             shipment_weight LIKE '1.50 Kg'
+             THEN '0.51-1.50 Kg'
+        WHEN shipment_weight LIKE '2.00 Kg' OR
+             shipment_weight LIKE '3.00 Kg'
+             THEN '1.51-3.00 Kg'
+        ELSE '3.00+ Kg'
+    END AS "Weight Range",
+    COUNT(*) AS "Count"
+FROM shipments
+WHERE shipment_weight IS NOT NULL
+GROUP BY 1
+ORDER BY COUNT(*) DESC""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Weight Range', 'Count'],
+                'chart_config': {'type': 'pie', 'x_axis': 'Weight Range', 'y_axis': 'Count'}
+            }
+        },
+        {
+            'id': 'daily_shipment_volume',
+            'report_name': 'Daily Shipment Volume (Last 30 Days)',
+            'description': 'Daily shipment counts for the last 30 days',
+            'sql_query': """SELECT
+    shipment_creation_date AS "Date",
+    COUNT(*) AS "Shipments"
+FROM shipments
+WHERE shipment_creation_date ~ '\\d{2}-[A-Za-z]{3}-25$'
+GROUP BY shipment_creation_date
+ORDER BY shipment_creation_date DESC
+LIMIT 30""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Date', 'Shipments'],
+                'chart_config': {'type': 'line', 'x_axis': 'Date', 'y_axis': 'Shipments'}
+            }
+        },
+        {
+            'id': 'shipper_performance_cities',
+            'report_name': 'Shipper Performance (Cities Served)',
+            'description': 'Shipper performance analysis including cities served',
+            'sql_query': """SELECT
+    shipper_phone AS "Phone",
+    shipper_name AS "Name",
+    COUNT(*) AS "Total Shipments",
+    COUNT(DISTINCT consignee_city) AS "Cities Served"
+FROM shipments
+WHERE shipper_phone LIKE '%{phone_number}%'
+GROUP BY shipper_phone, shipper_name""",
+            'parameters': {
+                'report_type': 'analytics',
+                'required_params': {'phone_number': '9516163600'},
+                'columns': ['Phone', 'Name', 'Total Shipments', 'Cities Served'],
+                'chart_config': {'type': 'bar', 'x_axis': 'Name', 'y_axis': 'Total Shipments'}
+            }
+        },
+        {
+            'id': 'phone_number_pattern_analysis',
+            'report_name': 'Phone Number Pattern Analysis',
+            'description': 'Analysis of phone number patterns and their distribution',
+            'sql_query': """SELECT
+    CASE
+        WHEN shipper_phone ~ '^05[0-9]{8}$'
+            THEN 'Saudi Mobile (05)'
+        WHEN shipper_phone ~ '^9[0-9]{8,10}$'
+            THEN 'Business (9xx)'
+        WHEN shipper_phone ~ '^8[0-9]{9}$'
+            THEN 'Toll-Free (800x)'
+        ELSE 'Other'
+    END AS "Phone Type",
+    COUNT(*) AS "Count",
+    ROUND(COUNT(*) * 100.0 /
+          (SELECT COUNT(*) FROM shipments), 2)
+          AS "Percentage"
+FROM shipments
+GROUP BY 1
+ORDER BY COUNT(*) DESC""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Phone Type', 'Count', 'Percentage'],
+                'chart_config': {'type': 'pie', 'x_axis': 'Phone Type', 'y_axis': 'Count'}
+            }
+        },
+        {
+            'id': 'city_to_city_routes',
+            'report_name': 'City-to-City Shipping Routes (Top 20)',
+            'description': 'Most popular shipping routes between cities',
+            'sql_query': """SELECT
+    shipper_city AS "Origin",
+    consignee_city AS "Destination",
+    COUNT(*) AS "Shipments"
+FROM shipments
+WHERE shipper_city IS NOT NULL
+  AND consignee_city IS NOT NULL
+GROUP BY shipper_city, consignee_city
+ORDER BY COUNT(*) DESC
+LIMIT 20""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Origin', 'Destination', 'Shipments'],
+                'chart_config': {'type': 'bar', 'x_axis': 'Origin', 'y_axis': 'Shipments'}
+            }
+        },
+        {
+            'id': 'reference_number_type_distribution',
+            'report_name': 'Reference Number Type Distribution',
+            'description': 'Analysis of reference number patterns and their distribution',
+            'sql_query': """SELECT
+    CASE
+        WHEN shipment_reference_number ~ '^SAL[0-9]+$'
+            THEN 'SAL Pattern'
+        WHEN shipment_reference_number ~ '^[0-9]+$'
+            THEN 'Numbers Only'
+        WHEN shipment_reference_number ~ '^[0-9]+-[0-9]+$'
+            THEN 'Numbers with Dash'
+        ELSE 'Other'
+    END AS "Pattern Type",
+    COUNT(*) AS "Count",
+    ROUND(COUNT(*) * 100.0 /
+          (SELECT COUNT(*) FROM shipments), 2)
+          AS "Percentage"
+FROM shipments
+GROUP BY 1
+ORDER BY COUNT(*) DESC""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Pattern Type', 'Count', 'Percentage'],
+                'chart_config': {'type': 'pie', 'x_axis': 'Pattern Type', 'y_axis': 'Count'}
+            }
+        },
+        {
+            'id': 'specific_shipper_top_cities',
+            'report_name': 'Specific Shipper\'s Top Cities',
+            'description': 'Top destination cities for a specific shipper',
+            'sql_query': """SELECT
+    consignee_city AS "City",
+    COUNT(*) AS "Shipments",
+    ROUND(COUNT(*) * 100.0 /
+          (SELECT COUNT(*) FROM shipments
+           WHERE shipper_phone LIKE '%{phone_number}%'),
+          2) AS "Percentage"
+FROM shipments
+WHERE shipper_phone LIKE '%{phone_number}%'
+  AND consignee_city IS NOT NULL
+GROUP BY consignee_city
+ORDER BY COUNT(*) DESC
+LIMIT 10""",
+            'parameters': {
+                'report_type': 'analytics',
+                'required_params': {'phone_number': '920033385'},
+                'columns': ['City', 'Shipments', 'Percentage'],
+                'chart_config': {'type': 'bar', 'x_axis': 'City', 'y_axis': 'Shipments'}
+            }
+        },
+        {
+            'id': 'multi_box_shipments_analysis',
+            'report_name': 'Multi-Box Shipments Analysis',
+            'description': 'Analysis of shipments by number of boxes',
+            'sql_query': """SELECT
+    number_of_shipment_boxes AS "Boxes",
+    COUNT(*) AS "Shipments",
+    ROUND(COUNT(*) * 100.0 /
+          (SELECT COUNT(*) FROM shipments), 2)
+          AS "Percentage"
+FROM shipments
+WHERE number_of_shipment_boxes IS NOT NULL
+GROUP BY number_of_shipment_boxes
+ORDER BY CAST(number_of_shipment_boxes AS INTEGER)""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Boxes', 'Shipments', 'Percentage'],
+                'chart_config': {'type': 'bar', 'x_axis': 'Boxes', 'y_axis': 'Shipments'}
+            }
+        },
+        {
+            'id': 'top_shippers_by_total_shipments',
+            'report_name': 'Top Shippers by Total Shipments',
+            'description': 'Top 25 shippers ranked by total shipment volume',
+            'sql_query': """SELECT
+    shipper_phone AS "Phone",
+    shipper_name AS "Name",
+    shipper_city AS "City",
+    COUNT(*) AS "Total Shipments"
+FROM shipments
+GROUP BY shipper_phone, shipper_name, shipper_city
+ORDER BY COUNT(*) DESC
+LIMIT 25""",
+            'parameters': {
+                'report_type': 'analytics',
+                'columns': ['Phone', 'Name', 'City', 'Total Shipments'],
+                'chart_config': {'type': 'bar', 'x_axis': 'Name', 'y_axis': 'Total Shipments'}
+            }
+        },
+        {
+            'id': 'shipments_by_specific_city',
+            'report_name': 'Shipments by City (Specific City)',
+            'description': 'Shippers sending to a specific destination city',
+            'sql_query': """SELECT
+    shipper_name AS "Shipper",
+    shipper_phone AS "Phone",
+    COUNT(*) AS "Shipments to {city_name}"
+FROM shipments
+WHERE consignee_city = '{city_name}'
+GROUP BY shipper_name, shipper_phone
+ORDER BY COUNT(*) DESC
+LIMIT 20""",
+            'parameters': {
+                'report_type': 'analytics',
+                'required_params': {'city_name': 'Riyadh'},
+                'columns': ['Shipper', 'Phone', 'Shipments to {city_name}'],
+                'chart_config': {'type': 'bar', 'x_axis': 'Shipper', 'y_axis': 'Shipments to {city_name}'}
+            }
+        },
+        {
+            'id': 'comprehensive_shipper_summary',
+            'report_name': 'Comprehensive Shipper Summary',
+            'description': 'Complete summary for a specific shipper including activity timeline',
+            'sql_query': """SELECT
+    shipper_phone AS "Phone",
+    shipper_name AS "Name",
+    COUNT(*) AS "Total Shipments",
+    COUNT(DISTINCT consignee_city) AS "Cities",
+    MIN(shipment_creation_date) AS "First Ship",
+    MAX(shipment_creation_date) AS "Last Ship"
+FROM shipments
+WHERE shipper_phone LIKE '%{phone_number}%'
+GROUP BY shipper_phone, shipper_name""",
             'parameters': {
                 'report_type': 'summary',
-                'filters': {'date_filter': 'month'},
-                'columns': ['id', 'number_shipment', 'shipper_name', 'consignee_name', 'shipment_creation_date', 'shipment_weight', 'cod_cash_on_delivery'],
-                'chart_config': {'type': 'bar', 'x_axis': 'shipment_creation_date', 'y_axis': 'count'}
-            }
-        },
-        {
-            'id': 'top_customers',
-            'report_name': 'Top Customers Report',
-            'description': 'List of top customers by shipment volume',
-            'sql_query': "SELECT shipper_name, shipper_phone_number, COUNT(*) as shipment_count FROM shipments WHERE shipper_name IS NOT NULL GROUP BY shipper_name, shipper_phone_number ORDER BY shipment_count DESC LIMIT 100",
-            'parameters': {
-                'report_type': 'analytics',
-                'filters': {'date_filter': 'month'},
-                'columns': ['shipper_name', 'shipper_phone_number', 'shipment_count'],
-                'chart_config': {'type': 'pie', 'x_axis': 'shipper_name', 'y_axis': 'shipment_count'}
-            }
-        },
-        {
-            'id': 'city_analysis',
-            'report_name': 'City Analysis Report',
-            'description': 'Shipment distribution by cities',
-            'sql_query': "SELECT consignee_city, COUNT(*) as shipment_count FROM shipments WHERE consignee_city IS NOT NULL AND consignee_city != '' GROUP BY consignee_city ORDER BY shipment_count DESC LIMIT 100",
-            'parameters': {
-                'report_type': 'analytics',
-                'filters': {'date_filter': 'month'},
-                'columns': ['consignee_city', 'shipment_count'],
-                'chart_config': {'type': 'bar', 'x_axis': 'consignee_city', 'y_axis': 'shipment_count'}
-            }
-        },
-        {
-            'id': 'weight_analysis',
-            'report_name': 'Weight Analysis Report',
-            'description': 'Analysis of shipment weights and averages',
-            'sql_query': "SELECT shipment_weight, cod_cash_on_delivery, shipment_creation_date FROM shipments WHERE shipment_weight IS NOT NULL AND shipment_weight != '' ORDER BY id DESC LIMIT 1000",
-            'parameters': {
-                'report_type': 'analytics',
-                'filters': {'date_filter': 'month'},
-                'columns': ['shipment_weight', 'cod_cash_on_delivery', 'shipment_creation_date'],
-                'chart_config': {'type': 'line', 'x_axis': 'shipment_creation_date', 'y_axis': 'shipment_weight'}
+                'required_params': {'phone_number': '920024673'},
+                'columns': ['Phone', 'Name', 'Total Shipments', 'Cities', 'First Ship', 'Last Ship'],
+                'chart_config': {'type': 'table', 'x_axis': 'Name', 'y_axis': 'Total Shipments'}
             }
         }
     ]
