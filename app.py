@@ -354,11 +354,11 @@ def normalize_iso_to_yyyymmdd(date_str):
         return None
 
 def process_arabic_text(text):
-    """Process text for PDF while preserving mixed Arabic/Latin order.
+    """Process Arabic text for correct Arabic rendering in PDF.
 
     - Cleans bidi control marks
-    - Reshapes ONLY Arabic runs; leaves Latin runs untouched
-    - Avoids full-string bidi reversal to prevent flipping "الإبداع BD"
+    - Applies shaping (arabic_reshaper) and bidi (python-bidi) if available
+    - Ensures UTF-8 safe output
     """
     try:
         if text is None:
@@ -372,38 +372,34 @@ def process_arabic_text(text):
         for ch in ['\u200f', '\u200e', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e']:
             text = text.replace(ch, '')
 
-        # Ensure valid UTF-8
+        # Try to ensure valid UTF-8
         try:
             text = text.encode('utf-8', errors='ignore').decode('utf-8')
         except Exception:
             pass
 
-        if not text:
-            return ''
+        # Apply Arabic shaping. For mixed Arabic/Latin, only shape Arabic spans
+        if _ARABIC_SHAPING_AVAILABLE and text:
+            try:
+                # Regex for Arabic Unicode ranges
+                arabic_regex = r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+"
+                pattern = re.compile(f"({arabic_regex})")
 
-        # If shaping not available, return as-is
-        if not _ARABIC_SHAPING_AVAILABLE:
-            return text
+                def _shape_span(match):
+                    arabic_span = match.group(0)
+                    try:
+                        reshaped = arabic_reshaper.reshape(arabic_span)
+                        # Reorder only the Arabic span to visual form
+                        return get_display(reshaped, base_dir='R')
+                    except Exception:
+                        return arabic_span
 
-        # Regex to split into Arabic and non-Arabic runs
-        arabic_range = '\\u0600-\\u06FF\\u0750-\\u077F\\u08A0-\\u08FF\\uFB50-\\uFDFF\\uFE70-\\uFEFF'
-        tokens = re.findall(f'[${arabic_range}]+|[^${arabic_range}]+', text)
+                # Replace Arabic spans with shaped visual forms; keep Latin as-is
+                text = pattern.sub(_shape_span, text)
+            except Exception:
+                pass
 
-        processed_parts = []
-        for token in tokens:
-            if re.match(f'^[${arabic_range}]+$', token):
-                try:
-                    # Reshape Arabic segment, then apply bidi for correct glyph order
-                    reshaped = arabic_reshaper.reshape(token)
-                    bidi_text = get_display(reshaped)
-                    processed_parts.append(bidi_text)
-                except Exception:
-                    processed_parts.append(token)
-            else:
-                # Leave Latin/number/punctuation segments untouched
-                processed_parts.append(token)
-
-        return ''.join(processed_parts)
+        return text
     except Exception:
         return str(text) if text is not None else ''
 
