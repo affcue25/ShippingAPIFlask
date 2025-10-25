@@ -367,21 +367,32 @@ def process_arabic_text(text):
 
         text = text.strip()
 
-        # Remove problematic bidi control marks that may show as squares
-        for ch in ['\u200f', '\u200e', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e']:
-            text = text.replace(ch, '')
-
         # Try to ensure valid UTF-8
         try:
             text = text.encode('utf-8', errors='ignore').decode('utf-8')
         except Exception:
             pass
 
-        # Apply Arabic shaping and bidi if modules are available
+        # Apply Arabic shaping and bidi only when appropriate
         if _ARABIC_SHAPING_AVAILABLE and text:
             try:
-                reshaped = arabic_reshaper.reshape(text)
-                text = get_display(reshaped)
+                # If text already contains Arabic Presentation Forms, do not reshape or reorder
+                has_presentation_forms = any(
+                    (0xFB50 <= ord(ch) <= 0xFDFF) or (0xFE70 <= ord(ch) <= 0xFEFF)
+                    for ch in text
+                )
+                if not has_presentation_forms:
+                    # Apply shaping only if the text contains Arabic letters
+                    has_arabic_letters = any(
+                        (0x0600 <= ord(ch) <= 0x06FF) or
+                        (0x0750 <= ord(ch) <= 0x077F) or
+                        (0x08A0 <= ord(ch) <= 0x08FF)
+                        for ch in text
+                    )
+                    if has_arabic_letters:
+                        reshaped = arabic_reshaper.reshape(text)
+                        # Force RTL base direction so mixed Arabic/English stays readable
+                        text = get_display(reshaped, base_dir='R')
             except Exception:
                 # Fallback to unshaped text
                 pass
