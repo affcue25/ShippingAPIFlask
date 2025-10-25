@@ -14,7 +14,6 @@ import json
 from datetime import datetime, timedelta
 from dateutil import parser
 import pandas as pd
-import re
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -378,25 +377,22 @@ def process_arabic_text(text):
         except Exception:
             pass
 
-        # Apply Arabic shaping. For mixed Arabic/Latin, only shape Arabic spans
-        if _ARABIC_SHAPING_AVAILABLE and text:
+        # Skip reshaping/bidi if the string already contains Arabic Presentation Forms
+        def _has_arabic_presentation_forms(s: str) -> bool:
+            for ch in s:
+                code = ord(ch)
+                if (0xFB50 <= code <= 0xFDFF) or (0xFE70 <= code <= 0xFEFF):
+                    return True
+            return False
+
+        # Apply Arabic shaping and bidi if modules are available and the text is not pre-shaped
+        if _ARABIC_SHAPING_AVAILABLE and text and not _has_arabic_presentation_forms(text):
             try:
-                # Regex for Arabic Unicode ranges
-                arabic_regex = r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+"
-                pattern = re.compile(f"({arabic_regex})")
-
-                def _shape_span(match):
-                    arabic_span = match.group(0)
-                    try:
-                        reshaped = arabic_reshaper.reshape(arabic_span)
-                        # Reorder only the Arabic span to visual form
-                        return get_display(reshaped, base_dir='R')
-                    except Exception:
-                        return arabic_span
-
-                # Replace Arabic spans with shaped visual forms; keep Latin as-is
-                text = pattern.sub(_shape_span, text)
+                reshaped = arabic_reshaper.reshape(text)
+                # Use RTL base direction so Arabic remains before Latin in mixed strings
+                text = get_display(reshaped, base_dir='R')
             except Exception:
+                # Fallback to unshaped text
                 pass
 
         return text
