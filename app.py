@@ -41,6 +41,7 @@ except Exception:
 
 # Global cache for chosen Arabic-capable font name
 _ARABIC_FONT_NAME = None
+_ARABIC_FONT_BOLD_NAME = None
 
 def register_arabic_font():
     """Register an Arabic-capable TrueType font and return its ReportLab name.
@@ -62,6 +63,20 @@ def register_arabic_font():
     ]
 
     search_paths = []
+    # Project-local font directories (searched first)
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_dir = os.getcwd()
+    project_local_dirs = [
+        base_dir,
+        os.path.join(base_dir, 'Amiri'),
+        os.path.join(base_dir, 'fonts'),
+        os.path.join(os.path.dirname(base_dir), 'Amiri'),
+    ]
+    for p in project_local_dirs:
+        if os.path.isdir(p):
+            search_paths.append(p)
     # Windows fonts directory
     try:
         win_dir = os.environ.get('WINDIR', 'C:\\Windows')
@@ -82,6 +97,20 @@ def register_arabic_font():
                 if os.path.exists(font_path):
                     pdfmetrics.registerFont(TTFont(font_name, font_path))
                     _ARABIC_FONT_NAME = font_name
+                    # Try to register a bold variant from the same directory when available
+                    try:
+                        bold_candidates = [
+                            (f"{font_name}-Bold", "Amiri-Bold.ttf"),
+                            (f"{font_name}-Bold", f"{font_name}-Bold.ttf"),
+                        ]
+                        for bold_name, bold_file in bold_candidates:
+                            bold_path = os.path.join(base, bold_file)
+                            if os.path.exists(bold_path):
+                                pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+                                globals()['_ARABIC_FONT_BOLD_NAME'] = bold_name
+                                break
+                    except Exception:
+                        pass
                     return _ARABIC_FONT_NAME
             except Exception:
                 # Try next candidate
@@ -1600,7 +1629,7 @@ def export_data():
                     ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                     ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), arabic_font),
+                    ('FONTNAME', (0, 0), (-1, 0), globals().get('_ARABIC_FONT_BOLD_NAME') or arabic_font),
                     ('FONTSIZE', (0, 0), (-1, 0), 10),
                     ('FONTSIZE', (0, 1), (-1, -1), 8),
                     ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
