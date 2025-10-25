@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta
 from dateutil import parser
 import pandas as pd
+import re
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -353,13 +354,11 @@ def normalize_iso_to_yyyymmdd(date_str):
         return None
 
 def process_arabic_text(text):
-    """Process Arabic text for correct rendering, preserving mixed Arabic/English order.
+    """Process text for PDF while preserving mixed Arabic/Latin order.
 
-    Strategy:
-    - Clean stray bidi marks
-    - If shaping available, shape only Arabic runs
-    - Wrap Arabic runs with RLE/PDF and Latin runs with LRE/PDF to avoid global reversal
-    - Avoid applying get_display to the whole string (which can flip run order)
+    - Cleans bidi control marks
+    - Reshapes ONLY Arabic runs; leaves Latin runs untouched
+    - Avoids full-string bidi reversal to prevent flipping "الإبداع BD"
     """
     try:
         if text is None:
@@ -367,75 +366,44 @@ def process_arabic_text(text):
         if not isinstance(text, str):
             text = str(text)
 
-        s = text.strip()
+        text = text.strip()
 
         # Remove problematic bidi control marks that may show as squares
         for ch in ['\u200f', '\u200e', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e']:
-            s = s.replace(ch, '')
+            text = text.replace(ch, '')
 
         # Ensure valid UTF-8
         try:
-            s = s.encode('utf-8', errors='ignore').decode('utf-8')
+            text = text.encode('utf-8', errors='ignore').decode('utf-8')
         except Exception:
             pass
 
-        if not s:
-            return s
+        if not text:
+            return ''
 
-        def is_arabic_char(c):
-            code = ord(c)
-            return (
-                0x0600 <= code <= 0x06FF or      # Arabic
-                0x0750 <= code <= 0x077F or      # Arabic Supplement
-                0x08A0 <= code <= 0x08FF or      # Arabic Extended-A
-                0xFB50 <= code <= 0xFDFF or      # Arabic Presentation Forms-A
-                0xFE70 <= code <= 0xFEFF or      # Arabic Presentation Forms-B
-                0x0660 <= code <= 0x0669 or      # Arabic-Indic digits
-                0x06F0 <= code <= 0x06F9        # Extended Arabic-Indic digits
-            )
+        # If shaping not available, return as-is
+        if not _ARABIC_SHAPING_AVAILABLE:
+            return text
 
-        has_ar = any(is_arabic_char(c) for c in s)
-        has_lat = any(('A' <= c <= 'Z') or ('a' <= c <= 'z') for c in s)
+        # Regex to split into Arabic and non-Arabic runs
+        arabic_range = '\\u0600-\\u06FF\\u0750-\\u077F\\u08A0-\\u08FF\\uFB50-\\uFDFF\\uFE70-\\uFEFF'
+        tokens = re.findall(f'[${arabic_range}]+|[^${arabic_range}]+', text)
 
-        # If no Arabic or no shaping available, just return cleaned string
-        if not has_ar or not _ARABIC_SHAPING_AVAILABLE:
-            return s
-
-        # Segment into runs of Arabic vs non-Arabic
-        runs = []
-        current = []
-        current_is_ar = is_arabic_char(s[0])
-        for ch in s:
-            ia = is_arabic_char(ch)
-            if ia == current_is_ar:
-                current.append(ch)
-            else:
-                runs.append((current_is_ar, ''.join(current)))
-                current = [ch]
-                current_is_ar = ia
-        if current:
-            runs.append((current_is_ar, ''.join(current)))
-
-        # Build output with embeddings to preserve relative order
-        parts = []
-        RLE = '\u202B'  # Right-to-Left Embedding
-        LRE = '\u202A'  # Left-to-Right Embedding
-        PDF = '\u202C'  # Pop Directional Formatting
-
-        for is_ar, token in runs:
-            if is_ar:
+        processed_parts = []
+        for token in tokens:
+            if re.match(f'^[${arabic_range}]+$', token):
                 try:
-                    shaped = arabic_reshaper.reshape(token)
-                    # Reorder characters for visual display of the Arabic run only
-                    visual = get_display(shaped)
+                    # Reshape Arabic segment, then apply bidi for correct glyph order
+                    reshaped = arabic_reshaper.reshape(token)
+                    bidi_text = get_display(reshaped)
+                    processed_parts.append(bidi_text)
                 except Exception:
-                    visual = token
-                parts.append(RLE + visual + PDF)
+                    processed_parts.append(token)
             else:
-                # Keep Latin/digits as-is but force LTR run
-                parts.append(LRE + token + PDF)
+                # Leave Latin/number/punctuation segments untouched
+                processed_parts.append(token)
 
-        return ''.join(parts)
+        return ''.join(processed_parts)
     except Exception:
         return str(text) if text is not None else ''
 
