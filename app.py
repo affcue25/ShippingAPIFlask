@@ -1537,6 +1537,7 @@ def export_data():
         elif export_format == 'pdf':
             # Create PDF file
             filename = f"export_{file_id}.pdf"
+            
             filepath = os.path.join(tempfile.gettempdir(), filename)
             
             # Ensure an Arabic-capable font is registered
