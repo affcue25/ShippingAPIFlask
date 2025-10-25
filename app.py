@@ -66,6 +66,31 @@ class DatabaseManager:
             cursor.close()
             conn.close()
     
+    def execute_raw_query(self, query):
+        """Execute raw SQL query without any conversion (for custom reports)"""
+        conn = self.get_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        try:
+            # Execute the query directly without any conversion
+            cursor.execute(query)
+            
+            # Fetch all results
+            results = cursor.fetchall()
+            
+            # Convert to list of dictionaries
+            data = []
+            for row in results:
+                data.append(dict(row))
+            
+            return data
+        except Exception as e:
+            print(f"SQL Error: {str(e)}")  # Debug log
+            raise e
+        finally:
+            cursor.close()
+            conn.close()
+    
     def execute_insert(self, query, params=None):
         """Execute insert/update/delete query"""
         conn = self.get_connection()
@@ -1714,7 +1739,10 @@ def run_custom_report(report_id):
         
         # Execute the stored SQL query
         if sql_query:
-            data = db.execute_query(sql_query)
+            # For custom SQL queries, execute directly without parameter conversion
+            print(f"Executing custom SQL query: {sql_query[:200]}...")  # Debug log
+            data = db.execute_raw_query(sql_query)
+            print(f"Query returned {len(data)} rows")  # Debug log
         else:
             # Fallback: build query from parameters
             filters = parameters.get('filters', {})
