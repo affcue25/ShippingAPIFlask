@@ -18,6 +18,8 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase import pdfmetrics
 import tempfile
 import uuid
 
@@ -28,6 +30,66 @@ CORS(app, origins=['*'], methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 
 # Database configuration
 from database_config import DB_CONFIG
+
+# Optional Arabic shaping/bidi dependencies (used if available)
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    _ARABIC_SHAPING_AVAILABLE = True
+except Exception:
+    _ARABIC_SHAPING_AVAILABLE = False
+
+# Global cache for chosen Arabic-capable font name
+_ARABIC_FONT_NAME = None
+
+def register_arabic_font():
+    """Register an Arabic-capable TrueType font and return its ReportLab name.
+
+    Tries several common fonts across platforms. Falls back to Helvetica if none found.
+    """
+    global _ARABIC_FONT_NAME
+    if _ARABIC_FONT_NAME:
+        return _ARABIC_FONT_NAME
+
+    # Candidate (name, filename) pairs
+    candidates = [
+        ("NotoNaskhArabic", "NotoNaskhArabic-Regular.ttf"),
+        ("Amiri", "Amiri-Regular.ttf"),
+        ("ArialUnicodeMS", "ARIALUNI.TTF"),  # Arial Unicode MS on Windows
+        ("Tahoma", "tahoma.ttf"),             # Windows
+        ("DejaVuSans", "DejaVuSans.ttf"),     # Often available and supports Arabic
+        ("Arial", "arial.ttf"),               # May have Arabic glyphs on Windows
+    ]
+
+    search_paths = []
+    # Windows fonts directory
+    try:
+        win_dir = os.environ.get('WINDIR', 'C:\\Windows')
+        search_paths.append(os.path.join(win_dir, 'Fonts'))
+    except Exception:
+        pass
+    # Common Linux font dirs
+    search_paths.extend([
+        '/usr/share/fonts',
+        '/usr/local/share/fonts',
+        os.path.expanduser('~/.fonts'),
+    ])
+
+    for font_name, file_name in candidates:
+        for base in search_paths:
+            try:
+                font_path = os.path.join(base, file_name)
+                if os.path.exists(font_path):
+                    pdfmetrics.registerFont(TTFont(font_name, font_path))
+                    _ARABIC_FONT_NAME = font_name
+                    return _ARABIC_FONT_NAME
+            except Exception:
+                # Try next candidate
+                continue
+
+    # Fallback if nothing was found/registered
+    _ARABIC_FONT_NAME = 'Helvetica'
+    return _ARABIC_FONT_NAME
 
 class DatabaseManager:
     """Database connection and query manager for PostgreSQL"""
@@ -262,143 +324,42 @@ def normalize_iso_to_yyyymmdd(date_str):
         return None
 
 def process_arabic_text(text):
-    """Process Arabic text for better display in PDF"""
+    """Process Arabic text for correct Arabic rendering in PDF.
+
+    - Cleans bidi control marks
+    - Applies shaping (arabic_reshaper) and bidi (python-bidi) if available
+    - Ensures UTF-8 safe output
+    """
     try:
-        if not text or not isinstance(text, str):
-            return str(text) if text else ''
-        
-        # Clean and normalize the text
-        text = str(text).strip()
-        
-        # Handle common Arabic text issues
-        # Replace problematic characters that might cause display issues
-        text = text.replace('\u200f', '')  # Right-to-left mark
-        text = text.replace('\u200e', '')  # Left-to-right mark
-        text = text.replace('\u202a', '')  # Left-to-right embedding
-        text = text.replace('\u202b', '')  # Right-to-left embedding
-        text = text.replace('\u202c', '')  # Pop directional formatting
-        text = text.replace('\u202d', '')  # Left-to-right override
-        text = text.replace('\u202e', '')  # Right-to-left override
-        
-        # Ensure proper UTF-8 encoding
+        if text is None:
+            return ''
+        if not isinstance(text, str):
+            text = str(text)
+
+        text = text.strip()
+
+        # Remove problematic bidi control marks that may show as squares
+        for ch in ['\u200f', '\u200e', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e']:
+            text = text.replace(ch, '')
+
+        # Try to ensure valid UTF-8
         try:
-            text = text.encode('utf-8').decode('utf-8')
-        except:
+            text = text.encode('utf-8', errors='ignore').decode('utf-8')
+        except Exception:
             pass
-            
+
+        # Apply Arabic shaping and bidi if modules are available
+        if _ARABIC_SHAPING_AVAILABLE and text:
+            try:
+                reshaped = arabic_reshaper.reshape(text)
+                text = get_display(reshaped)
+            except Exception:
+                # Fallback to unshaped text
+                pass
+
         return text
     except Exception:
-        # If processing fails, return original text
-        return str(text) if text else ''
-
-def is_arabic_text(text):
-    """Check if text contains Arabic characters"""
-    if not text or not isinstance(text, str):
-        return False
-    
-    # Arabic Unicode ranges
-    arabic_ranges = [
-        (0x0600, 0x06FF),  # Arabic
-        (0x0750, 0x077F),  # Arabic Supplement
-        (0x08A0, 0x08FF),  # Arabic Extended-A
-        (0xFB50, 0xFDFF),  # Arabic Presentation Forms-A
-        (0xFE70, 0xFEFF),  # Arabic Presentation Forms-B
-    ]
-    
-    for char in text:
-        char_code = ord(char)
-        for start, end in arabic_ranges:
-            if start <= char_code <= end:
-                return True
-    return False
-
-def get_arabic_font():
-    """Get Arabic-compatible font for PDF generation"""
-    try:
-        # Try to use a system font that supports Arabic
-        # Common Arabic fonts on Windows
-        arabic_fonts = [
-            'Arial Unicode MS',
-            'Tahoma',
-            'Arial',
-            'Times New Roman',
-            'DejaVu Sans'
-        ]
-        
-        # For now, return a basic font that might work
-        # In a production environment, you'd want to embed a proper Arabic font
-        return 'Helvetica'  # Fallback to Helvetica
-    except:
-        return 'Helvetica'
-
-def transliterate_arabic_to_latin(text):
-    """Convert Arabic text to Latin transliteration for PDF display"""
-    try:
-        if not text or not isinstance(text, str):
-            return str(text) if text else ''
-        
-        # Enhanced Arabic to Latin transliteration mapping
-        arabic_to_latin = {
-            # Basic letters
-            'ا': 'a', 'أ': 'a', 'إ': 'i', 'آ': 'aa', 'ء': 'a',
-            'ب': 'b', 'ت': 't', 'ث': 'th', 'ج': 'j', 'ح': 'h',
-            'خ': 'kh', 'د': 'd', 'ذ': 'dh', 'ر': 'r', 'ز': 'z',
-            'س': 's', 'ش': 'sh', 'ص': 's', 'ض': 'd', 'ط': 't',
-            'ظ': 'z', 'ع': 'a', 'غ': 'gh', 'ف': 'f', 'ق': 'q',
-            'ك': 'k', 'ل': 'l', 'م': 'm', 'ن': 'n', 'ه': 'h',
-            'و': 'w', 'ي': 'y', 'ى': 'a', 'ة': 'h',
-            
-            # Diacritics and special characters
-            'َ': 'a', 'ُ': 'u', 'ِ': 'i', 'ً': 'an', 'ٌ': 'un', 'ٍ': 'in',
-            'ْ': '', 'ّ': '', 'ٰ': 'a',
-            
-            # Common words and phrases
-            'ال': 'al-', 'لل': 'lil-', 'لا': 'la', 'في': 'fi',
-            'من': 'min', 'إلى': 'ila', 'على': 'ala', 'مع': 'ma',
-            'هذا': 'hatha', 'هذه': 'hathihi', 'ذلك': 'dhalik',
-            'التي': 'allati', 'الذي': 'alladhi',
-            
-            # Numbers
-            '٠': '0', '١': '1', '٢': '2', '٣': '3', '٤': '4',
-            '٥': '5', '٦': '6', '٧': '7', '٨': '8', '٩': '9',
-            
-            # Punctuation
-            '،': ',', '؛': ';', '؟': '?', '!': '!'
-        }
-        
-        # Convert Arabic characters to Latin
-        result = ''
-        i = 0
-        while i < len(text):
-            char = text[i]
-            
-            # Check for multi-character sequences first
-            if i < len(text) - 1:
-                two_char = text[i:i+2]
-                if two_char in arabic_to_latin:
-                    result += arabic_to_latin[two_char]
-                    i += 2
-                    continue
-            
-            # Single character
-            if char in arabic_to_latin:
-                result += arabic_to_latin[char]
-            else:
-                result += char
-            i += 1
-        
-        # Clean up the result
-        result = result.strip()
-        
-        # If the result is empty or mostly spaces, return a meaningful placeholder
-        if not result or result.count(' ') == len(result):
-            return f"[Arabic: {text[:20]}{'...' if len(text) > 20 else ''}]"
-        
-        return result
-        
-    except Exception:
-        # If transliteration fails, return a placeholder
-        return f"[Arabic: {text[:20]}{'...' if len(text) > 20 else ''}]"
+        return str(text) if text is not None else ''
 
 def build_sql_query_from_filters(filters, columns):
     """Build SQL query from filters and columns"""
@@ -1578,12 +1539,14 @@ def export_data():
             filename = f"export_{file_id}.pdf"
             filepath = os.path.join(tempfile.gettempdir(), filename)
             
-            
+            # Ensure an Arabic-capable font is registered
+            arabic_font = register_arabic_font()
+
             doc = SimpleDocTemplate(filepath, pagesize=letter)
             styles = getSampleStyleSheet()
             story = []
             
-            # Add title
+            # Add title (use default style; table cells use explicit font)
             title = Paragraph("Shipping Data Export", styles['Title'])
             story.append(title)
             story.append(Spacer(1, 12))
@@ -1605,22 +1568,27 @@ def export_data():
                     table_data.append(row_data)
                 
                 # Create table with better Arabic text support
-                # Use simple strings instead of Paragraph objects to avoid font issues
+                # Convert text data to Paragraph objects with Arabic-capable font
                 processed_table_data = []
                 for row_idx, row in enumerate(table_data):
                     processed_row = []
                     for cell in row:
                         if isinstance(cell, str) and cell.strip():
-                            # Process the text and handle Arabic characters
-                            processed_text = process_arabic_text(cell)
-                            
-                            # For Arabic text, use transliteration to avoid display issues
-                            if is_arabic_text(processed_text):
-                                # Convert Arabic text to transliterated form
-                                processed_cell = transliterate_arabic_to_latin(processed_text)
-                            else:
-                                # For non-Arabic text, use as is
-                                processed_cell = processed_text
+                            # Use Paragraph for better text rendering
+                            try:
+                                # Create a simple paragraph style
+                                from reportlab.lib.styles import ParagraphStyle
+                                style = ParagraphStyle(
+                                    'CustomStyle',
+                                    fontName=arabic_font,
+                                    fontSize=8 if row_idx > 0 else 10,
+                                    alignment=1,  # Center alignment
+                                    spaceAfter=6,
+                                    spaceBefore=6
+                                )
+                                processed_cell = Paragraph(process_arabic_text(cell), style)
+                            except:
+                                processed_cell = process_arabic_text(cell)
                         else:
                             processed_cell = process_arabic_text(cell) if cell else ''
                         processed_row.append(processed_cell)
@@ -1631,7 +1599,7 @@ def export_data():
                     ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                     ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTNAME', (0, 0), (-1, 0), arabic_font),
                     ('FONTSIZE', (0, 0), (-1, 0), 10),
                     ('FONTSIZE', (0, 1), (-1, -1), 8),
                     ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
