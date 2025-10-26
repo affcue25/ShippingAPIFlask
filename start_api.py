@@ -64,6 +64,9 @@ def check_database():
         # Create scheduled_reports table if it doesn't exist
         create_scheduled_reports_table(cursor)
         
+        # Create dashboard_widgets table if it doesn't exist
+        create_dashboard_widgets_table(cursor)
+        
         cursor.close()
         conn.close()
         
@@ -196,6 +199,51 @@ def create_scheduled_reports_table(cursor):
         
     except Exception as e:
         print(f"❌ Error creating scheduled_reports table: {e}")
+        raise
+
+def create_dashboard_widgets_table(cursor):
+    """Create dashboard_widgets table if it doesn't exist"""
+    try:
+        # Check if table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'dashboard_widgets'
+            )
+        """)
+        table_exists = cursor.fetchone()[0]
+        
+        if table_exists:
+            print("✅ dashboard_widgets table already exists")
+            return
+        
+        # Create the table
+        cursor.execute("""
+            CREATE TABLE dashboard_widgets (
+                id SERIAL PRIMARY KEY,
+                widget_name VARCHAR(255) NOT NULL,
+                description TEXT,
+                widget_type VARCHAR(50) DEFAULT 'number_card',
+                sql_query TEXT NOT NULL,
+                icon VARCHAR(100) DEFAULT 'activity',
+                color VARCHAR(50) DEFAULT '#3B82F6',
+                date_range VARCHAR(50) DEFAULT 'today',
+                position INTEGER DEFAULT 0,
+                is_active BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                user_id VARCHAR(100) DEFAULT 'default_user'
+            )
+        """)
+        
+        # Add index for performance
+        cursor.execute("CREATE INDEX idx_widgets_position ON dashboard_widgets(position)")
+        
+        print("✅ dashboard_widgets table created successfully")
+        
+    except Exception as e:
+        print(f"❌ Error creating dashboard_widgets table: {e}")
         raise
 
 def start_api():

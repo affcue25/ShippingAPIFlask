@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta
 from dateutil import parser
 import pandas as pd
+import re
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -2489,6 +2490,219 @@ def update_search_usage(search_id):
             'message': 'Usage updated successfully'
         })
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ============================================
+# DASHBOARD WIDGETS API
+# ============================================
+
+def get_date_range(range_type, custom_start=None, custom_end=None):
+    """Convert date range type to start/end dates"""
+    today = datetime.now().date()
+    
+    if range_type == 'today':
+        return today, today
+    elif range_type == 'yesterday':
+        yesterday = today - timedelta(days=1)
+        return yesterday, yesterday
+    elif range_type == 'this_week':
+        start = today - timedelta(days=today.weekday())
+        return start, today
+    elif range_type == 'this_month':
+        start = today.replace(day=1)
+        return start, today
+    elif range_type == 'custom':
+        return custom_start, custom_end
+    return today, today
+
+@app.route('/api/widgets', methods=['GET'])
+def get_widgets():
+    """Get all active widgets ordered by position"""
+    try:
+        query = """
+        SELECT * FROM dashboard_widgets
+        WHERE is_active = true
+        ORDER BY position ASC
+        """
+        widgets = db.execute_query(query)
+        return jsonify({'success': True, 'data': widgets})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/widgets', methods=['POST'])
+def create_widget():
+    """Create new dashboard widget"""
+    try:
+        data = request.get_json()
+        
+        # Validate SQL query
+        sql_query = data['sql_query'].strip()
+        if not re.match(r'^\s*SELECT', sql_query, re.IGNORECASE):
+            return jsonify({
+                'error': 'Only SELECT queries allowed'
+            }), 400
+        
+        # Get max position
+        pos_query = "SELECT COALESCE(MAX(position), -1) + 1 FROM dashboard_widgets"
+        result = db.execute_query(pos_query)
+        next_position = result[0]['coalesce']
+        
+        query = """
+        INSERT INTO dashboard_widgets
+        (widget_name, description, widget_type, sql_query,
+         icon, color, date_range, position)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """
+        
+        widget_id = db.execute_insert(query, [
+            data['widget_name'],
+            data.get('description', ''),
+            data.get('widget_type', 'number_card'),
+            sql_query,
+            data.get('icon', 'activity'),
+            data.get('color', '#3B82F6'),
+            data.get('date_range', 'today'),
+            next_position
+        ])
+        
+        return jsonify({
+            'success': True,
+            'id': widget_id,
+            'message': 'Widget created successfully'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/widgets/<int:widget_id>', methods=['PUT'])
+def update_widget(widget_id):
+    """Update dashboard widget"""
+    try:
+        data = request.get_json()
+        
+        # Validate SQL query if provided
+        if 'sql_query' in data:
+            sql_query = data['sql_query'].strip()
+            if not re.match(r'^\s*SELECT', sql_query, re.IGNORECASE):
+                return jsonify({
+                    'error': 'Only SELECT queries allowed'
+                }), 400
+        else:
+            sql_query = None
+        
+        query = """
+        UPDATE dashboard_widgets
+        SET widget_name = %s, description = %s, widget_type = %s,
+            sql_query = %s, icon = %s, color = %s, date_range = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """
+        
+        # Get current widget data
+        current_query = "SELECT * FROM dashboard_widgets WHERE id = %s"
+        current_widget = db.execute_query(current_query, [widget_id])
+        
+        if not current_widget:
+            return jsonify({'error': 'Widget not found'}), 404
+        
+        current = current_widget[0]
+        
+        db.execute_insert(query, [
+            data.get('widget_name', current['widget_name']),
+            data.get('description', current['description']),
+            data.get('widget_type', current['widget_type']),
+            sql_query or current['sql_query'],
+            data.get('icon', current['icon']),
+            data.get('color', current['color']),
+            data.get('date_range', current['date_range']),
+            widget_id
+        ])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Widget updated successfully'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/widgets/<int:widget_id>', methods=['DELETE'])
+def delete_widget(widget_id):
+    """Delete dashboard widget"""
+    try:
+        query = "UPDATE dashboard_widgets SET is_active = false WHERE id = %s"
+        db.execute_insert(query, [widget_id])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Widget deleted successfully'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/widgets/<int:widget_id>/execute', methods=['POST'])
+def execute_widget(widget_id):
+    """Execute widget query with date range"""
+    try:
+        # Get widget
+        query = "SELECT * FROM dashboard_widgets WHERE id = %s"
+        widgets = db.execute_query(query, [widget_id])
+        
+        if not widgets:
+            return jsonify({'error': 'Widget not found'}), 404
+        
+        widget = widgets[0]
+        
+        # Get date range
+        data = request.get_json() or {}
+        start_date, end_date = get_date_range(
+            widget['date_range'],
+            data.get('custom_start'),
+            data.get('custom_end')
+        )
+        
+        # Format dates for SQL (DD-MMM-YY format)
+        start_str = start_date.strftime('%d-%b-%y')
+        end_str = end_date.strftime('%d-%b-%y')
+        
+        # Replace date placeholders
+        sql_query = widget['sql_query']
+        sql_query = sql_query.replace('{start_date}', start_str)
+        sql_query = sql_query.replace('{end_date}', end_str)
+        
+        # Execute query
+        results = db.execute_raw_query(sql_query)
+        
+        return jsonify({
+            'success': True,
+            'data': results,
+            'date_range': {
+                'start': start_str,
+                'end': end_str
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/widgets/reorder', methods=['PUT'])
+def reorder_widgets():
+    """Update widget positions after drag-drop"""
+    try:
+        data = request.get_json()
+        widgets = data['widgets']
+        
+        for index, widget in enumerate(widgets):
+            query = """
+            UPDATE dashboard_widgets
+            SET position = %s
+            WHERE id = %s
+            """
+            db.execute_insert(query, [index, widget['id']])
+        
+        return jsonify({
+            'success': True,
+            'message': 'Widgets reordered successfully'
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
