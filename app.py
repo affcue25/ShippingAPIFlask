@@ -2544,9 +2544,9 @@ def create_widget():
             }), 400
         
         # Get max position
-        pos_query = "SELECT COALESCE(MAX(position), -1) + 1 FROM dashboard_widgets"
+        pos_query = "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM dashboard_widgets"
         result = db.execute_query(pos_query)
-        next_position = result[0]['coalesce']
+        next_position = result[0]['next_position']
         
         query = """
         INSERT INTO dashboard_widgets
